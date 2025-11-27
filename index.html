@@ -240,6 +240,89 @@
       );
     };
 
+// ==================== 出庫頁（完整版）===================
+  const StockOutPage = ({ supabase, userId, overviewData }) => {
+    const [barcode, setBarcode] = useState('');
+    const [qty, setQty] = useState(1);
+    const [msg, setMsg] = useState('');
+
+    const handleOut = async e => {
+      e.preventDefault();
+      const item = overviewData.find(x => x.barcode === barcode);
+      if (!item || qty > item.currentStock) return setMsg('條碼錯誤或數量不足');
+      const { error } = await supabase.from('stock_outs').insert({
+        user_id: userId, barcode, name: item.name, quantity: qty
+      });
+      if (error) setMsg('失敗：'+error.message);
+      else { setMsg(`成功出庫 ${qty} 件！`); setBarcode(''); setQty(1); }
+      setTimeout(() => setMsg(''), 3000);
+    };
+
+    return (
+      <div className="p-6 bg-white rounded-2xl shadow-xl max-w-2xl mx-auto">
+        <h2 className="text-3xl font-bold mb-8">手動出庫</h2>
+        <form onSubmit={handleOut} className="space-y-6">
+          <input placeholder="條碼" value={barcode} onChange={e=>setBarcode(e.target.value)} className="w-full p-4 border rounded-lg text-xl" required />
+          <input type="number" min="1" placeholder="數量" value={qty} onChange={e=>setQty(parseInt(e.target.value)||1)} className="w-full p-4 border rounded-lg text-xl" />
+          <button type="submit" className="w-full py-5 bg-red-600 text-white text-xl font-bold rounded-lg hover:bg-red-700">
+            確認出庫
+          </button>
+          {msg && <p className={msg.includes('成功')?'text-green-600':'text-red-600'}>{msg}</p>}
+        </form>
+
+        <h3 className="text-2xl font-bold mt-12 mb-4">快速點選出庫</h3>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          {overviewData.filter(x=>x.currentStock>0).map(item => (
+            <button key={item.barcode} onClick={()=>{setBarcode(item.barcode);setQty(1);window.scrollTo(0,0);}}
+              className="p-4 bg-gray-100 rounded-lg hover:bg-gray-200 text-left">
+              <div className="font-bold">{item.name}</div>
+              <div className="text-sm text-gray-600">{item.barcode}</div>
+              <div className="text-green-700 font-bold">庫存 {item.currentStock}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ==================== 設定頁（完整版）===================
+  const SettingsPanel = ({ supabase, userId, currentSettings, onUpdate }) => {
+    const [cats, setCats] = useState(currentSettings.categories.join(', '));
+    const [currency, setCurrency] = useState(currentSettings.currency);
+    const [msg, setMsg] = useState('');
+
+    const save = async () => {
+      const newCats = cats.split(',').map(s=>s.trim()).filter(Boolean);
+      const { error } = await supabase.from('user_settings').upsert({
+        user_id: userId, categories: newCats, currency
+      });
+      if (error) setMsg('失敗：'+error.message);
+      else { setMsg('設定已儲存！'); onUpdate?.(); setTimeout(()=>setMsg(''),2000); }
+    };
+
+    return (
+      <div className="p-6 bg-white rounded-2xl shadow-xl max-w-2xl mx-auto">
+        <h2 className="text-3xl font-bold mb-8">系統設定</h2>
+        <div className="space-y-6">
+          <div>
+            <label className="block text-lg font-medium mb-2">分類（用逗號分隔）</label>
+            <input value={cats} onChange={e=>setCats(e.target.value)} className="w-full p-4 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-lg font-medium mb-2">預設幣別</label>
+            <select value={currency} onChange={e=>setCurrency(e.target.value)} className="w-full p-4 border rounded-lg">
+              {Object.keys(CURRENCY_SYMBOLS).map(c=><option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <button onClick={save} className="w-full py-4 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700">
+            儲存設定
+          </button>
+          {msg && <p className="text-center text-green-600 font-bold">{msg}</p>}
+        </div>
+      </div>
+    );
+  };
+    
     // ==================== 庫存總覽 + 明細（最完整版） ====================
     const InventoryOverview = ({ supabase, userId, settings, rawOverviewData, stockOuts }) => {
       const [category, setCategory] = useState('所有項目');
@@ -461,4 +544,5 @@
 </body>
 
 </html>
+
 
