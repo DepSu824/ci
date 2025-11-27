@@ -521,20 +521,21 @@
             </div>
           </header>
 
-          <nav className="bg-white border-b">
-            <div className="max-w-7xl mx-auto px-4">
-              <button onClick={()=>setTab('inventory')} className={tab==='inventory'?'text-blue-600 border-b-4 border-blue-600 py-4 px-8':'py-4 px-8'}>總覽</button>
-              <button onClick={()=>setTab('add')} className={tab==='add'?'text-blue-600 border-b-4 border-blue-600 py-4 px-8':'py-4 px-8'}>新增</button>
-              <button onClick={()=>setTab('stockout')} className={tab==='stockout'?'text-blue-600 border-b-4 border-blue-600 py-4 px-8':'py-4 px-8'}>出庫</button>
-              <button onClick={()=>setTab('settings')} className={tab==='settings'?'text-blue-600 border-b-4 border-blue-600 py-4 px-8':'py-4 px-8'}>設定</button>
-            </div>
-          </nav>
+          <nav className="bg-white border-b sticky top-0 z-10 shadow">
+  <div className="max-w-7xl mx-auto px-6">
+    <button onClick={()=>setTab('inventory')} className={tab==='inventory' ? 'border-b-4 border-blue-600 px-8 py-4 font-bold text-blue-600' : 'px-8 py-4 text-gray-700'}>總覽</button>
+    <button onClick={()=>setTab('add')}       className={tab==='add'      ? 'border-b-4 border-blue-600 px-8 py-4 font-bold text-blue-600' : 'px-8 py-4 text-gray-700'}>新增</button>
+    <button onClick={()=>setTab('stockout')}  className={tab==='stockout' ? 'border-b-4 border-blue-600 px-8 py-4 font-bold text-blue-600' : 'px-8 py-4 text-gray-700'}>出庫</button>
+    <button onClick={()=>setTab('settings')} className={tab==='settings' ? 'border-b-4 border-blue-600 px-8 py-4 font-bold text-blue-600' : 'px-8 py-4 text-gray-700'}>設定</button>
+  </div>
+</nav>
 
           <main className="max-w-7xl mx-auto p-6">
-            {tab==='inventory' && <InventoryOverview supabase={supabase} userId={user.id} settings={settings} rawOverviewData={overviewData} stockOuts={stockOuts} />}
-            {tab==='add' && <AddItemForm supabase={supabase} userId={user.id} categories={settings.categories} defaultCurrency={settings.currency} onSuccess={()=>setTab('inventory')} />}
-            {/* 你原本的 StockOutPage、SettingsPanel 也完全一樣方式改 */}
-          </main>
+  {tab==='inventory' && <InventoryOverview supabase={supabase} userId={user.id} settings={settings} rawOverviewData={overviewData} stockOuts={stockOuts} />}
+  {tab==='add'      && <AddItemForm      supabase={supabase} userId={user.id} categories={settings.categories} defaultCurrency={settings.currency} onSuccess={()=>setTab('inventory')} />}
+  {tab==='stockout' && <StockOutPage     supabase={supabase} userId={user.id} overviewData={overviewData} />}
+  {tab==='settings' && <SettingsPanel    supabase={supabase} userId={user.id} currentSettings={settings} onUpdate={()=>location.reload()} />}
+</main>
         </div>
       );
     };
@@ -544,5 +545,6 @@
 </body>
 
 </html>
+
 
 
