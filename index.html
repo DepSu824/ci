@@ -74,11 +74,12 @@
         const { createClient } = supabase;
 
         // ----------------------------------------------------------------------
-        // 1. 設定 Supabase
+        // 1. 設定 Supabase & 常數
         // ----------------------------------------------------------------------
         const SUPABASE_URL = 'https://edtoegcycroomrcebywq.supabase.co';
         const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVkdG9lZ2N5Y3Jvb21yY2VieXdxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQyMjczMzcsImV4cCI6MjA3OTgwMzMzN30.PFVzPDIhxrxW47lDaUW-3aQtD_QbwJcn2muENJRra_s';
         const COMMON_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'HKD', 'TWD', 'CNY', 'VND', 'SGD']; 
+        const FRANKFURTER_API = 'https://api.frankfurter.app'; // 匯率 API 基礎 URL
 
         const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -106,7 +107,6 @@
         const formatTimestamp = (timestamp) => {
             if (!timestamp) return '-';
             try {
-                // 將 ISO 8601 格式的字串轉換成 Date 物件
                 return new Date(timestamp).toLocaleString('zh-TW', {
                     year: 'numeric',
                     month: '2-digit',
@@ -117,13 +117,31 @@
                     hour12: false,
                 });
             } catch (e) {
-                return timestamp; // 返回原始值以防解析錯誤
+                return timestamp; 
             }
         };
 
+        // 貨幣轉換函式
+        const convertCurrency = (amount, fromCurrency, toCurrency, rates) => {
+            if (fromCurrency === toCurrency) return amount;
+            if (!rates || !rates[fromCurrency] || !rates[toCurrency]) {
+                // 如果匯率不足，先返回原始金額，並在控制台報警
+                console.warn(`Missing exchange rate for ${fromCurrency} or ${toCurrency}. Conversion failed.`);
+                return amount; 
+            }
+            
+            // 匯率 API 是以 BASE 貨幣 (通常為 EUR) 為基礎
+            // 1. 將 fromCurrency 轉換為 EUR: amount / rates[fromCurrency]
+            // 2. 將 EUR 轉換為 toCurrency: result * rates[toCurrency]
+            const rateFrom = rates[fromCurrency];
+            const rateTo = rates[toCurrency];
 
-// 聚合庫存數據 (修正版本)
-        const aggregateInventoryData = (inventory = [], stockOuts = []) => {
+            return (amount / rateFrom) * rateTo;
+        };
+
+
+        // 聚合庫存數據 (修正版本：加入匯率計算)
+        const aggregateInventoryData = (inventory = [], stockOuts = [], targetCurrency, rates) => {
             const grouped = {};
             const stockOutMap = {};
 
@@ -143,42 +161,55 @@
                         name: item.name,
                         category: item.category,
                         totalInStock: 0,
-                        totalCost: 0,
-                        avgCost: 0,
-                        avgPurchasePrice: 0, // 新增：平均購入價
-                        maxPrice: 0,         // 新增：最高價
-                        minPrice: 0,         // 新增：最低價
+                        totalCost: 0, // 總成本（原幣種）
+                        totalCostConverted: 0, // 總成本（轉換後）
+                        avgCostConverted: 0, 
+                        avgPurchasePrice: 0, 
+                        maxPrice: 0,         
+                        minPrice: 0,         
                         currentStock: 0,
                     };
                 }
-                // totalInStock 稍後會重新計算，這裡僅用來初始化
+                // totalInStock 稍後會重新計算
             });
 
-            // 3. 計算平均成本、平均購入價、最高/最低價和剩餘庫存
+            // 3. 計算成本、平均購入價、最高/最低價和剩餘庫存
             Object.values(grouped).forEach(item => {
                 const uniquePurchaseRecords = inventory.filter(inv => inv.barcode === item.barcode);
                 
-                // 排除價格為 0 的「贈品」記錄
-                const validPurchaseRecords = uniquePurchaseRecords.filter(rec => (rec.price || 0) > 0);
+                // 擴充紀錄：加入轉換後的價格
+                const recordsWithConvertedPrice = uniquePurchaseRecords.map(rec => {
+                    const originalPrice = rec.price || 0;
+                    const priceConverted = convertCurrency(originalPrice, rec.currency, targetCurrency, rates);
+                    return {
+                        ...rec,
+                        priceConverted: priceConverted,
+                        // 轉換後的價格是否大於 0 (用於排除贈品)
+                        isValidPurchase: originalPrice > 0, 
+                    };
+                });
+                
+                // 排除價格為 0 的「贈品」記錄 (使用轉換前價格來判斷是否為贈品)
+                const validPurchaseRecords = recordsWithConvertedPrice.filter(rec => rec.isValidPurchase);
 
-                item.totalInStock = uniquePurchaseRecords.length; // 總入庫數量 (包含贈品)
+                item.totalInStock = recordsWithConvertedPrice.length; // 總入庫數量 (包含贈品)
                 
-                // 總成本 (包含贈品)
-                item.totalCost = uniquePurchaseRecords.reduce((sum, rec) => sum + (rec.price || 0), 0);
+                // 總成本 (以目標貨幣計算 - 包含贈品)
+                item.totalCostConverted = recordsWithConvertedPrice.reduce((sum, rec) => sum + rec.priceConverted, 0);
                 
-                // 現時平均成本 (總成本 / 總數量)
-                item.avgCost = item.totalInStock > 0 ? item.totalCost / item.totalInStock : 0;
+                // 現時平均成本 (總轉換後成本 / 總數量)
+                item.avgCostConverted = item.totalInStock > 0 ? item.totalCostConverted / item.totalInStock : 0;
                 
                 // 計算平均購入價 (排除贈品)
                 if (validPurchaseRecords.length > 0) {
-                    const validTotalCost = validPurchaseRecords.reduce((sum, rec) => sum + rec.price, 0);
+                    const validTotalCost = validPurchaseRecords.reduce((sum, rec) => sum + rec.priceConverted, 0);
                     item.avgPurchasePrice = validTotalCost / validPurchaseRecords.length;
                     
-                    // 計算最高價 (從有效購入記錄中取最大值)
-                    item.maxPrice = Math.max(...validPurchaseRecords.map(rec => rec.price));
+                    // 計算最高價 (從有效購入記錄的轉換後價格中取最大值)
+                    item.maxPrice = Math.max(...validPurchaseRecords.map(rec => rec.priceConverted));
                     
-                    // 計算最低價 (從有效購入記錄中取最小值，排除 0)
-                    item.minPrice = Math.min(...validPurchaseRecords.map(rec => rec.price));
+                    // 計算最低價 (從有效購入記錄的轉換後價格中取最小值)
+                    item.minPrice = Math.min(...validPurchaseRecords.map(rec => rec.priceConverted));
                 } else {
                     item.avgPurchasePrice = 0;
                     item.maxPrice = 0;
@@ -195,6 +226,7 @@
         // ----------------------------------------------------------------------
         // 3. Supabase 身份驗證/登入組件 (AuthForm)
         // ----------------------------------------------------------------------
+        // (略 - 保持不變)
         const AuthForm = ({ supabaseClient }) => {
             const [email, setEmail] = useState('');
             const [password, setPassword] = useState('');
@@ -282,6 +314,7 @@
         // ----------------------------------------------------------------------
         // 4. BarcodeScanner 組件
         // ----------------------------------------------------------------------
+        // (略 - 保持不變)
         const BarcodeScanner = ({ onDetected }) => {
             const [error, setError] = useState(null);
             const scannerRef = React.useRef(null);
@@ -339,12 +372,13 @@
         // ----------------------------------------------------------------------
         // 5. 單筆交易編輯/刪除組件 (TransactionRow)
         // ----------------------------------------------------------------------
+        // (略 - 保持不變)
         const TransactionRow = ({ record, onUpdated, userId }) => {
             const [isEditing, setIsEditing] = useState(false);
             const [editData, setEditData] = useState({
                 price: record.price || 0,
                 currency: record.currency || 'HKD',
-                store: record.store || '', // Supabase 使用 store 欄位
+                store: record.store || '', 
                 quantity: Math.abs(record.quantity),
             });
             const [saving, setSaving] = useState(false);
@@ -383,7 +417,7 @@
                     if (error) throw error;
                     setMessage('已更新！');
                     setIsEditing(false);
-                    onUpdated?.(); // 通知父層刷新數據
+                    onUpdated?.(); 
                 } catch (err) {
                     console.error(err);
                     setMessage('更新失敗');
@@ -505,6 +539,7 @@
         // ----------------------------------------------------------------------
         // 6.1. 快速取貨/出庫面板 (QuickStockOutPanel)
         // ----------------------------------------------------------------------
+        // (略 - 保持不變)
         const QuickStockOutPanel = ({ item, currentStock, userId, refreshData }) => {
             const [takeOutQuantity, setTakeOutQuantity] = useState(1);
             const [loading, setLoading] = useState(false);
@@ -529,7 +564,6 @@
                         barcode: item.barcode,
                         name: item.name,
                         quantity: qty,
-                        // store: '', // 保持一致，暫時不記錄備註
                     };
 
                     const { error } = await supabaseClient
@@ -580,6 +614,7 @@
         // ----------------------------------------------------------------------
         // 6.2. 快速補貨/入庫面板 (QuickStockInPanel)
         // ----------------------------------------------------------------------
+        // (略 - 保持不變)
         const QuickStockInPanel = ({ item, settings, userId, refreshData }) => {
             const [addQuantity, setAddQuantity] = useState(1);
             const [addPrice, setAddPrice] = useState(''); // 單件價格
@@ -703,8 +738,9 @@
         
 
         // ----------------------------------------------------------------------
-        // 7. 詳細明細彈窗 (DetailModal) - 包含所有編輯和快速操作功能
+        // 7. 詳細明細彈窗 (DetailModal) 
         // ----------------------------------------------------------------------
+        // (略 - 保持不變)
         const DetailModal = ({ item, inventory, stockOuts, onClose, settings, userId, refreshData }) => {
             const [loading, setLoading] = useState(false);
             const [message, setMessage] = useState('');
@@ -718,7 +754,7 @@
             const [editCategory, setEditCategory] = useState(item.category);
             const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
             
-            // 交易歷史記錄 (保持不變)
+            // 交易歷史記錄 
             const transactionHistory = useMemo(() => {
                 const purchases = inventory
                     .filter(rec => rec.barcode === item.barcode)
@@ -934,15 +970,15 @@
                                 </p>
                             )}
                             
-                            {/* 總覽資訊區塊 */}
+                            {/* 總覽資訊區塊 - 僅保留庫存/價格資訊 */}
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 text-center">
                                 <div className="p-4 bg-blue-50 rounded-lg">
                                     <p className="text-xs text-gray-600">現有庫存</p>
                                     <p className="text-2xl font-bold text-blue-800">{item.currentStock}</p>
                                 </div>
                                 <div className="p-4 bg-green-50 rounded-lg">
-                                    <p className="text-xs text-gray-600">平均成本</p>
-                                    <p className="text-xl font-bold text-green-800">{formatCurrency(item.avgCost, settings.currency)}</p>
+                                    <p className="text-xs text-gray-600">平均購入價 ({settings.currency})</p>
+                                    <p className="text-xl font-bold text-green-800">{formatCurrency(item.avgPurchasePrice, settings.currency)}</p>
                                 </div>
                                 <div className="p-4 bg-gray-50 rounded-lg flex flex-col justify-center">
                                     <p className="text-xs text-gray-600">分類</p>
@@ -969,7 +1005,7 @@
                                 </div>
                             </div>
                             
-                            {/* ✅ 新增：快速取貨與補貨面板 */}
+                            {/* 快速取貨與補貨面板 */}
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
                                 <QuickStockOutPanel 
                                     item={item} 
@@ -1009,7 +1045,7 @@
                                                 <TransactionRow 
                                                     key={record.id} 
                                                     record={record} 
-                                                    onUpdated={refreshData} // 每次更新後重新載入數據
+                                                    onUpdated={refreshData} 
                                                     userId={userId}
                                                 />
                                             ))
@@ -1041,7 +1077,7 @@
         };
 
         // ----------------------------------------------------------------------
-        // 8. 應用程式主體：App 組件 (修正了 Hooks 的調用順序)
+        // 8. 應用程式主體：App 組件 (修正匯率獲取邏輯)
         // ----------------------------------------------------------------------
         const App = () => {
             // --- 狀態 Hooks (必須在組件頂部) ---
@@ -1053,7 +1089,9 @@
             const [inventory, setInventory] = useState([]); 
             const [stockOuts, setStockOuts] = useState([]);
             const [settings, setSettings] = useState(null); 
-            const [selectedItem, setSelectedItem] = useState(null); // 用於明細彈窗
+            const [selectedItem, setSelectedItem] = useState(null); 
+            const [exchangeRates, setExchangeRates] = useState(null); // 新增：匯率狀態
+            const [rateError, setRateError] = useState(null);
 
             // Derived State
             const userId = session?.user?.id || null;
@@ -1061,26 +1099,9 @@
             // 處理資料獲取和訂閱的函式 (useCallback)
             const fetchInitialData = useCallback(async () => {
                 if (!userId) return;
-
-                // Fetch Inventory Items (inventory_items table)
-                const { data: invData, error: invError } = await supabaseClient
-                    .from('inventory_items') 
-                    .select('*')
-                    .eq('user_id', userId)
-                    .order('created_at', { ascending: false }); // 確保最新的記錄在前面
-                if (invError) console.error("Error fetching inventory:", invError);
-                else setInventory(invData);
-
-                // Fetch Stock Outs (stock_outs table)
-                const { data: outData, error: outError } = await supabaseClient
-                    .from('stock_outs') 
-                    .select('*')
-                    .eq('user_id', userId)
-                    .order('created_at', { ascending: false });
-                if (outError) console.error("Error fetching stock outs:", outError);
-                else setStockOuts(outData);
-
-                // Fetch Settings (user_settings table)
+                
+                // 1. Fetch Settings (必須先執行，以獲取目標貨幣)
+                let currentSettings = null;
                 const { data: settingsData, error: settingsError } = await supabaseClient
                     .from('user_settings') 
                     .select('*')
@@ -1094,11 +1115,50 @@
                     if (typeof categoriesArray === 'string') {
                         categoriesArray = categoriesArray.split(',').map(s => s.trim()).filter(s => s.length > 0);
                     }
-                    setSettings({ ...settingsData, categories: categoriesArray || [] });
-
+                    currentSettings = { ...settingsData, categories: categoriesArray || [] };
+                    setSettings(currentSettings);
                 } else {
-                     setSettings({ categories: ['電子產品', '服裝', '食品', '書籍', '其他'], currency: 'HKD', user_id: userId });
+                    currentSettings = { categories: ['電子產品', '服裝', '食品', '書籍', '其他'], currency: 'HKD', user_id: userId };
+                    setSettings(currentSettings);
                 }
+
+                // 2. Fetch Exchange Rates (使用設定中的目標貨幣)
+                let rates = null;
+                const targetCurrency = currentSettings?.currency || 'HKD';
+                const rateUrl = `${FRANKFURTER_API}/latest?from=EUR&to=${COMMON_CURRENCIES.join(',')}`; // API 預設基礎貨幣是 EUR
+                try {
+                    const response = await fetch(rateUrl);
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    const data = await response.json();
+                    
+                    // 因為 API 返回的 rates 是基於 EUR，我們需要將 EUR 自身的匯率也加上
+                    rates = { ...data.rates, EUR: 1 }; 
+                    setExchangeRates(rates);
+                    setRateError(null);
+                } catch (error) {
+                    console.error("Error fetching exchange rates:", error);
+                    setRateError("無法獲取即時匯率，成本計算可能不準確。");
+                    setExchangeRates({}); 
+                }
+                
+                // 3. Fetch Inventory Items
+                const { data: invData, error: invError } = await supabaseClient
+                    .from('inventory_items') 
+                    .select('*')
+                    .eq('user_id', userId)
+                    .order('created_at', { ascending: false }); 
+                if (invError) console.error("Error fetching inventory:", invError);
+                else setInventory(invData);
+
+                // 4. Fetch Stock Outs
+                const { data: outData, error: outError } = await supabaseClient
+                    .from('stock_outs') 
+                    .select('*')
+                    .eq('user_id', userId)
+                    .order('created_at', { ascending: false });
+                if (outError) console.error("Error fetching stock outs:", outError);
+                else setStockOuts(outData);
+
             }, [userId]);
 
 
@@ -1126,8 +1186,7 @@
 
                 fetchInitialData();
 
-                // Setup Realtime Subscriptions
-                // 這裡的訂閱僅用於觸發重新獲取資料，以確保編輯操作後的數據刷新
+                // Setup Realtime Subscriptions (略 - 保持不變，但依賴 fetchInitialData)
                 const inventorySubscription = supabaseClient
                     .channel('inventory_changes')
                     .on(
@@ -1166,19 +1225,20 @@
                     supabaseClient.removeChannel(stockOutsSubscription);
                     supabaseClient.removeChannel(settingsSubscription);
                 };
-            }, [userId, fetchInitialData]); // 依賴 fetchInitialData
+            }, [userId, fetchInitialData]); 
 
-            // --- 派生狀態 Hooks (修正：移到條件判斷之前) ---
-            // 聚合數據
-            const overviewData = useMemo(() => aggregateInventoryData(inventory, stockOuts), [inventory, stockOuts]);
+            // --- 派生狀態 Hooks ---
+            // 聚合數據：使用 settings.currency 和 exchangeRates 進行轉換
+            const overviewData = useMemo(() => {
+                if (!settings || !exchangeRates) return [];
+                const targetCurrency = settings.currency;
+                return aggregateInventoryData(inventory, stockOuts, targetCurrency, exchangeRates);
+            }, [inventory, stockOuts, settings, exchangeRates]);
 
-            // 尋找選中的項目（如果數據刷新了，需要重新匹配）
+            // 尋找選中的項目
             const currentSelectedItem = useMemo(() => {
                 if (!selectedItem) return null;
-                // 使用最新的 overviewData 來匹配 selectedItem，確保數據最新
                 const latestItem = overviewData.find(item => item.barcode === selectedItem.barcode);
-                
-                // 如果在 overviewData 中找不到（例如：該項目庫存已為零且被過濾，但 DetailModal 還開著），則使用 selectedItem 舊數據
                 return latestItem || selectedItem;
             }, [selectedItem, overviewData]);
 
@@ -1188,10 +1248,11 @@
             };
 
             // --- 條件渲染 (在 Hooks 調用之後) ---
-            if (loading) {
+            if (loading || !settings) {
                 return (
                     <div className="min-h-screen flex items-center justify-center">
                         <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600"></div>
+                        <p className="ml-4 text-gray-700">載入中...</p>
                     </div>
                 );
             }
@@ -1201,9 +1262,9 @@
             }
             
             // ----------------------------------------------------------------------
-            // 9. 組件 - 庫存概覽 (InventoryOverview) (保持不變)
+            // 9. 組件 - 庫存概覽 (InventoryOverview) (修正：移除總價值/總成本，加入匯率錯誤提示)
             // ----------------------------------------------------------------------
-            const InventoryOverview = ({ settings, overviewData, setSelectedItem }) => {
+            const InventoryOverview = ({ settings, overviewData, setSelectedItem, rateError }) => {
                 const [filterText, setFilterText] = useState('');
                 const [filterCategory, setFilterCategory] = useState('All'); 
                 const [sortKey, setSortKey] = useState('currentStock');
@@ -1246,8 +1307,6 @@
                     }
                 };
 
-                const totalValue = filteredAndSortedData.reduce((sum, item) => sum + (item.currentStock * item.avgCost), 0);
-
                 const getSortIndicator = (key) => {
                     if (sortKey === key) {
                         return sortDirection === 'asc' ? ' ▲' : ' ▼';
@@ -1257,10 +1316,16 @@
 
                 return (
                     <div className="space-y-6">
-                        <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-md">
-                            <h3 className="text-xl font-semibold text-gray-800">
-                                總庫存價值: <span className="text-blue-600">{formatCurrency(totalValue, settings.currency)}</span>
-                            </h3>
+                        
+                        {/* ⚠️ 匯率錯誤提示 */}
+                        {rateError && (
+                            <div className="p-4 bg-yellow-100 text-yellow-800 rounded-lg border border-yellow-300 text-sm font-medium">
+                                ⚠️ {rateError} 您的成本計算結果可能不準確。
+                            </div>
+                        )}
+
+                        <div className="flex justify-end items-center bg-white p-4 rounded-xl shadow-md">
+                            {/* 移除總庫存價值顯示 */}
                             <div className="flex gap-4">
                                 {/* 分類篩選器 (Select) */}
                                 <select
@@ -1287,68 +1352,67 @@
                             <table className="min-w-full divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                     <tr>
-                                        {['名稱', '條碼', '類別', '現有庫存', '平均購入價', '最高價', '最低價', '總成本'].map((header, index) => {
-                                        const keyMap = ['name', 'barcode', 'category', 'currentStock', 'avgPurchasePrice', 'maxPrice', 'minPrice', 'totalCost'];
-                                        const key = keyMap[index];
-                                        // 注意：這裡將 avgCost 替換為 avgPurchasePrice
-                                        const isNumeric = ['currentStock', 'avgPurchasePrice', 'maxPrice', 'minPrice', 'totalCost'].includes(key); 
+                                        {/* 修正欄位：移除總成本，使用轉換後的平均購入價 */}
+                                        {['名稱', '條碼', '類別', '現有庫存', `平均購入價 (${settings.currency})`, `最高價 (${settings.currency})`, `最低價 (${settings.currency})`].map((header, index) => {
+                                            const keyMap = ['name', 'barcode', 'category', 'currentStock', 'avgPurchasePrice', 'maxPrice', 'minPrice'];
+                                            const key = keyMap[index];
+                                            
+                                            const isNumeric = ['currentStock', 'avgPurchasePrice', 'maxPrice', 'minPrice'].includes(key);
 
-                                        return (
-                                            <th
-                                                key={key}
-                                                onClick={() => handleSort(key)}
-                                                className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer transition duration-150 hover:bg-gray-100 ${isNumeric ? 'text-right' : ''}`}
-                                            >
-                                                {header}
-                                                {getSortIndicator(key)}
-                                            </th>
-                                        );
-                                    })}
+                                            return (
+                                                <th
+                                                    key={key}
+                                                    onClick={() => handleSort(key)}
+                                                    className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer transition duration-150 hover:bg-gray-100 ${isNumeric ? 'text-right' : ''}`}
+                                                >
+                                                    {header}
+                                                    {getSortIndicator(key)}
+                                                </th>
+                                            );
+                                        })}
                                     </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
                                     {filteredAndSortedData.length === 0 ? (
                                         <tr>
-                                            <td colSpan="6" className="px-6 py-4 text-center text-gray-500">
+                                            <td colSpan="7" className="px-6 py-4 text-center text-gray-500">
                                                 {overviewData.length === 0 ? '目前沒有任何庫存項目。' : '找不到符合條件的項目。'}
                                             </td>
                                         </tr>
                                     ) : (
                                         filteredAndSortedData.map((item) => (
-                                        <tr key={item.barcode} className={`${item.currentStock === 0 ? 'bg-red-50 text-gray-500' : 'hover:bg-gray-50'}`}>
-                                            <td 
-                                                className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer underline" 
-                                                onClick={() => setSelectedItem(item)} 
-                                            >
-                                                {item.name}
-                                            </td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.barcode}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.category}</td>
-                                            <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold text-right ${item.currentStock === 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                                {item.currentStock}
-                                            </td>
-                                            
-                                            {/* 📌 新增：平均購入價 */}
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-800 text-right">
-                                                {formatCurrency(item.avgPurchasePrice, settings.currency)}
-                                            </td>
-                                            
-                                            {/* 📌 新增：最高價 */}
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 text-right">
-                                                {item.maxPrice > 0 ? formatCurrency(item.maxPrice, settings.currency) : '-'}
-                                            </td>
-                                            
-                                            {/* 📌 新增：最低價 */}
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 text-right">
-                                                {item.minPrice > 0 ? formatCurrency(item.minPrice, settings.currency) : '-'}
-                                            </td>
+                                            <tr key={item.barcode} className={`${item.currentStock === 0 ? 'bg-red-50 text-gray-500' : 'hover:bg-gray-50'}`}>
+                                                <td 
+                                                    className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer underline" 
+                                                    onClick={() => setSelectedItem(item)} 
+                                                >
+                                                    {item.name}
+                                                </td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.barcode}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.category}</td>
+                                                <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold text-right ${item.currentStock === 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                    {item.currentStock}
+                                                </td>
+                                                
+                                                {/* 平均購入價 (已轉換) */}
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-800 text-right">
+                                                    {formatCurrency(item.avgPurchasePrice, settings.currency)}
+                                                </td>
+                                                
+                                                {/* 最高價 (已轉換) */}
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 text-right">
+                                                    {item.maxPrice > 0 ? formatCurrency(item.maxPrice, settings.currency) : '-'}
+                                                </td>
+                                                
+                                                {/* 最低價 (已轉換) */}
+                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 text-right">
+                                                    {item.minPrice > 0 ? formatCurrency(item.minPrice, settings.currency) : '-'}
+                                                </td>
 
-                                            {/* 總成本 (以現時平均成本 (avgCost) 計算總價值) */}
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-800 text-right">
-                                                {formatCurrency(item.avgCost * item.currentStock, settings.currency)}
-                                            </td>
-                                        </tr>
-                                    ))
+                                                {/* 移除總成本欄位 */}
+                                                
+                                            </tr>
+                                        ))
                                     )}
                                 </tbody>
                             </table>
@@ -1358,8 +1422,9 @@
             };
 
             // ----------------------------------------------------------------------
-            // 10. 組件 - 新增加 (AddItemForm) (保持不變)
+            // 10. 組件 - 新增加 (AddItemForm) 
             // ----------------------------------------------------------------------
+            // (略 - 保持不變)
             const AddItemForm = ({ supabaseClient, userId, categories, defaultCurrency, onSuccess }) => {
                 const [name, setName] = useState('');
                 const [barcode, setBarcode] = useState('');
@@ -1398,7 +1463,7 @@
                         category,
                         price: parseFloat(price), 
                         currency: itemCurrency, 
-                        store: '', // 新增時備註欄位暫時留空
+                        store: '', 
                     };
 
                     try {
@@ -1569,8 +1634,9 @@
             };
 
             // ----------------------------------------------------------------------
-            // 11. 組件 - 設定面板 (SettingsPanel) (保持不變)
+            // 11. 組件 - 設定面板 (SettingsPanel) 
             // ----------------------------------------------------------------------
+            // (略 - 保持不變)
             const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab }) => {
                 const [categoriesInput, setCategoriesInput] = useState(
                     Array.isArray(currentSettings.categories) 
@@ -1688,8 +1754,9 @@
 
 
             // ----------------------------------------------------------------------
-            // 12. 組件 - 出庫頁面 (StockOutPage) (保持不變)
+            // 12. 組件 - 出庫頁面 (StockOutPage) 
             // ----------------------------------------------------------------------
+            // (略 - 保持不變)
             const StockOutPage = ({ supabaseClient, userId, inventory, stockOuts, setActiveTab }) => {
                 const [barcode, setBarcode] = useState('');
                 const [name, setName] = useState('');
@@ -1701,7 +1768,8 @@
                 // 建立「名稱 → 條碼」的映射表（只包含目前有庫存的項目）
                 const nameToBarcodeMap = useMemo(() => {
                     const map = {};
-                    const grouped = aggregateInventoryData(inventory, stockOuts);
+                    // 這裡不需要匯率，所以直接傳入 null, {}
+                    const grouped = aggregateInventoryData(inventory, stockOuts, null, {}); 
                     grouped.forEach(item => {
                         if (item.currentStock > 0) {
                             if (!map[item.name]) {
@@ -1720,7 +1788,7 @@
                         setName('');
                         return;
                     }
-                    const grouped = aggregateInventoryData(inventory, stockOuts);
+                    const grouped = aggregateInventoryData(inventory, stockOuts, null, {});
                     const found = grouped.find(g => g.barcode === barcode);
                     if (found) {
                         setName(found.name);
@@ -1743,7 +1811,7 @@
 
                 // 計算目前庫存量
                 const currentStock = useMemo(() => {
-                    const grouped = aggregateInventoryData(inventory, stockOuts);
+                    const grouped = aggregateInventoryData(inventory, stockOuts, null, {});
                     const item = grouped.find(g => g.barcode === barcode);
                     return item ? item.currentStock : 0;
                 }, [barcode, inventory, stockOuts]);
@@ -1775,7 +1843,6 @@
                         barcode: barcode.trim(),
                         name: name.trim(),
                         quantity: qty,
-                        // store: '', // Supabase 表格中沒有 store 欄位，如果需要備註請在 stock_outs 增加
                     };
 
                     try {
@@ -1995,6 +2062,7 @@
                                 settings={settings}
                                 overviewData={overviewData}
                                 setSelectedItem={setSelectedItem} 
+                                rateError={rateError}
                             />
                         )}
                         
@@ -2022,7 +2090,7 @@
                         {/* 明細彈窗渲染 */}
                         {currentSelectedItem && settings && (
                             <DetailModal
-                                item={currentSelectedItem} // 使用匹配最新的聚合數據
+                                item={currentSelectedItem} 
                                 inventory={inventory}
                                 stockOuts={stockOuts}
                                 onClose={() => setSelectedItem(null)}
@@ -2034,7 +2102,7 @@
                     </main>
 
                     <footer className="py-4 text-center text-sm text-gray-500">
-                        <p>© 2024年庫存管理應用程式。所有資料均使用 Supabase PostgREST 即時同步。</p>
+                        <p>© 2024年庫存管理應用程式。所有資料均使用 Supabase PostgREST 即時同步。匯率由 Frankfurter API 提供。</p>
                     </footer>
                 </div>
             );
