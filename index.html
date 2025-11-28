@@ -122,7 +122,7 @@
         };
 
 
-        // 聚合庫存數據
+// 聚合庫存數據 (修正版本)
         const aggregateInventoryData = (inventory = [], stockOuts = []) => {
             const grouped = {};
             const stockOutMap = {};
@@ -136,7 +136,6 @@
             // 2. 處理入庫數據並聚合
             inventory.forEach(item => {
                 const key = item.barcode;
-                const itemCost = item.price || 0; 
                 
                 if (!grouped[key]) {
                     grouped[key] = {
@@ -146,22 +145,45 @@
                         totalInStock: 0,
                         totalCost: 0,
                         avgCost: 0,
+                        avgPurchasePrice: 0, // 新增：平均購入價
+                        maxPrice: 0,         // 新增：最高價
+                        minPrice: 0,         // 新增：最低價
                         currentStock: 0,
                     };
                 }
-                grouped[key].totalInStock += 1; 
-                grouped[key].category = item.category; // 使用最新的 category
-                grouped[key].name = item.name; // 使用最新的 name
+                // totalInStock 稍後會重新計算，這裡僅用來初始化
             });
 
-            // 3. 計算平均成本和剩餘庫存
+            // 3. 計算平均成本、平均購入價、最高/最低價和剩餘庫存
             Object.values(grouped).forEach(item => {
-                // 計算平均成本：基於所有 purchase records 的總成本 / 總數量
                 const uniquePurchaseRecords = inventory.filter(inv => inv.barcode === item.barcode);
-                item.totalInStock = uniquePurchaseRecords.length;
+                
+                // 排除價格為 0 的「贈品」記錄
+                const validPurchaseRecords = uniquePurchaseRecords.filter(rec => (rec.price || 0) > 0);
+
+                item.totalInStock = uniquePurchaseRecords.length; // 總入庫數量 (包含贈品)
+                
+                // 總成本 (包含贈品)
                 item.totalCost = uniquePurchaseRecords.reduce((sum, rec) => sum + (rec.price || 0), 0);
                 
+                // 現時平均成本 (總成本 / 總數量)
                 item.avgCost = item.totalInStock > 0 ? item.totalCost / item.totalInStock : 0;
+                
+                // 計算平均購入價 (排除贈品)
+                if (validPurchaseRecords.length > 0) {
+                    const validTotalCost = validPurchaseRecords.reduce((sum, rec) => sum + rec.price, 0);
+                    item.avgPurchasePrice = validTotalCost / validPurchaseRecords.length;
+                    
+                    // 計算最高價 (從有效購入記錄中取最大值)
+                    item.maxPrice = Math.max(...validPurchaseRecords.map(rec => rec.price));
+                    
+                    // 計算最低價 (從有效購入記錄中取最小值，排除 0)
+                    item.minPrice = Math.min(...validPurchaseRecords.map(rec => rec.price));
+                } else {
+                    item.avgPurchasePrice = 0;
+                    item.maxPrice = 0;
+                    item.minPrice = 0; 
+                }
                 
                 const totalOut = stockOutMap[item.barcode] || 0;
                 item.currentStock = item.totalInStock - totalOut;
@@ -1265,22 +1287,23 @@
                             <table className="min-w-full divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                     <tr>
-                                        {['名稱', '條碼', '類別', '現有庫存', '平均成本', '總成本'].map((header, index) => {
-                                            const keyMap = ['name', 'barcode', 'category', 'currentStock', 'avgCost', 'totalCost'];
-                                            const key = keyMap[index];
-                                            const isNumeric = ['currentStock', 'avgCost', 'totalCost'].includes(key);
+                                        {['名稱', '條碼', '類別', '現有庫存', '平均購入價', '最高價', '最低價', '總成本'].map((header, index) => {
+                                        const keyMap = ['name', 'barcode', 'category', 'currentStock', 'avgPurchasePrice', 'maxPrice', 'minPrice', 'totalCost'];
+                                        const key = keyMap[index];
+                                        // 注意：這裡將 avgCost 替換為 avgPurchasePrice
+                                        const isNumeric = ['currentStock', 'avgPurchasePrice', 'maxPrice', 'minPrice', 'totalCost'].includes(key); 
 
-                                            return (
-                                                <th
-                                                    key={key}
-                                                    onClick={() => handleSort(key)}
-                                                    className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer transition duration-150 hover:bg-gray-100 ${isNumeric ? 'text-right' : ''}`}
-                                                >
-                                                    {header}
-                                                    {getSortIndicator(key)}
-                                                </th>
-                                            );
-                                        })}
+                                        return (
+                                            <th
+                                                key={key}
+                                                onClick={() => handleSort(key)}
+                                                className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer transition duration-150 hover:bg-gray-100 ${isNumeric ? 'text-right' : ''}`}
+                                            >
+                                                {header}
+                                                {getSortIndicator(key)}
+                                            </th>
+                                        );
+                                    })}
                                     </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
@@ -1292,26 +1315,40 @@
                                         </tr>
                                     ) : (
                                         filteredAndSortedData.map((item) => (
-                                            <tr key={item.barcode} className={`${item.currentStock === 0 ? 'bg-red-50 text-gray-500' : 'hover:bg-gray-50'}`}>
-                                                <td 
-                                                    className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer underline" 
-                                                    onClick={() => setSelectedItem(item)} 
-                                                >
-                                                    {item.name}
-                                                </td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.barcode}</td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.category}</td>
-                                                <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold text-right ${item.currentStock === 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                                    {item.currentStock}
-                                                </td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">
-                                                    {formatCurrency(item.avgCost, settings.currency)}
-                                                </td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">
-                                                    {formatCurrency(item.avgCost * item.currentStock, settings.currency)}
-                                                </td>
-                                            </tr>
-                                        ))
+                                        <tr key={item.barcode} className={`${item.currentStock === 0 ? 'bg-red-50 text-gray-500' : 'hover:bg-gray-50'}`}>
+                                            <td 
+                                                className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer underline" 
+                                                onClick={() => setSelectedItem(item)} 
+                                            >
+                                                {item.name}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.barcode}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.category}</td>
+                                            <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold text-right ${item.currentStock === 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                {item.currentStock}
+                                            </td>
+                                            
+                                            {/* 📌 新增：平均購入價 */}
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-800 text-right">
+                                                {formatCurrency(item.avgPurchasePrice, settings.currency)}
+                                            </td>
+                                            
+                                            {/* 📌 新增：最高價 */}
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 text-right">
+                                                {item.maxPrice > 0 ? formatCurrency(item.maxPrice, settings.currency) : '-'}
+                                            </td>
+                                            
+                                            {/* 📌 新增：最低價 */}
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 text-right">
+                                                {item.minPrice > 0 ? formatCurrency(item.minPrice, settings.currency) : '-'}
+                                            </td>
+
+                                            {/* 總成本 (以現時平均成本 (avgCost) 計算總價值) */}
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-800 text-right">
+                                                {formatCurrency(item.avgCost * item.currentStock, settings.currency)}
+                                            </td>
+                                        </tr>
+                                    ))
                                     )}
                                 </tbody>
                             </table>
