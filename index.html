@@ -78,14 +78,15 @@
         // ----------------------------------------------------------------------
         const SUPABASE_URL = 'https://edtoegcycroomrcebywq.supabase.co';
         const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVkdG9lZ2N5Y3Jvb21yY2VieXdxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQyMjczMzcsImV4cCI6MjA3OTgwMzMzN30.PFVzPDIhxrxW47lDaUW-3aQtD_QbwJcn2muENJRra_s';
+        const COMMON_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'HKD', 'TWD', 'CNY', 'VND', 'SGD']; // ✅ 新增常用貨幣列表
 
         const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
         // ----------------------------------------------------------------------
-        // 2. 輔助函式 (已更新欄位名稱)
+        // 2. 輔助函式
         // ----------------------------------------------------------------------
 
-        // 格式化貨幣 (與原版相同)
+        // 格式化貨幣
         const formatCurrency = (amount, currencyCode = 'USD') => {
             if (typeof amount !== 'number') return '';
             const formatter = new Intl.NumberFormat('en-US', {
@@ -97,7 +98,7 @@
             return formatter.format(amount);
         };
 
-        // 聚合庫存數據 (已更新使用 item.price 而非 item.cost，並假設每行是一個 item)
+        // 聚合庫存數據
         const aggregateInventoryData = (inventory = [], stockOuts = []) => {
             const grouped = {};
             const stockOutMap = {};
@@ -111,7 +112,6 @@
             // 2. 處理入庫數據並聚合
             inventory.forEach(item => {
                 const key = item.barcode;
-                // 注意：這裡使用 item.price (對應您的 purchase record price)
                 const itemCost = item.price || 0; 
                 
                 if (!grouped[key]) {
@@ -125,7 +125,6 @@
                         currentStock: 0,
                     };
                 }
-                // 由於 inventory_items 中沒有 quantity，我們假設每一行代表 1 件商品
                 grouped[key].totalInStock += 1; 
                 grouped[key].totalCost += itemCost;
             });
@@ -141,7 +140,7 @@
         };
 
         // ----------------------------------------------------------------------
-        // 3. Supabase 身份驗證/登入組件 (AuthForm) (與原版相同)
+        // 3. Supabase 身份驗證/登入組件 (AuthForm)
         // ----------------------------------------------------------------------
         const AuthForm = ({ supabaseClient }) => {
             const [email, setEmail] = useState('');
@@ -157,11 +156,9 @@
 
                 try {
                     if (isLogin) {
-                        // 登入
                         const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
                         if (error) throw error;
                     } else {
-                        // 註冊
                         const { error } = await supabaseClient.auth.signUp({ email, password });
                         if (error) throw error;
                         setMessage('註冊成功！請檢查您的電子郵件以確認帳戶，然後登入。');
@@ -230,7 +227,7 @@
         };
 
         // ----------------------------------------------------------------------
-        // 4. BarcodeScanner 組件 (與原版相同)
+        // 4. BarcodeScanner 組件
         // ----------------------------------------------------------------------
         const BarcodeScanner = ({ onDetected }) => {
             const [error, setError] = useState(null);
@@ -247,7 +244,7 @@
                         constraints: {
                             width: 640,
                             height: 480,
-                            facingMode: "environment" // 使用後置鏡頭
+                            facingMode: "environment" 
                         },
                     },
                     decoder: {
@@ -286,24 +283,103 @@
             );
         };
 
+        // ----------------------------------------------------------------------
+        // 5. 詳細明細彈窗 (DetailModal) ✅ 新增功能
+        // ----------------------------------------------------------------------
+        const DetailModal = ({ item, inventory, stockOuts, onClose, settings }) => {
+            const itemDetails = inventory.filter(inv => inv.barcode === item.barcode)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); // 按時間降序排列
+
+            const isStockOut = (inventoryItem) => {
+                // 這是簡化的邏輯。在更複雜的系統中，您需要追蹤每個入庫 ID 的出庫情況。
+                // 這裡我們只顯示原始入庫列表。
+                return false; 
+            };
+
+            const isItemOut = (inventoryItem) => {
+                // 為了模擬，我們假設任何已經 aggregated out 的 item 在這裡都是 "出庫"
+                const outCount = stockOuts.filter(out => out.barcode === item.barcode).reduce((sum, out) => sum + out.quantity, 0);
+                return outCount > 0;
+            }
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+                        <div className="p-6">
+                            <h2 className="text-2xl font-bold mb-2 text-gray-800">
+                                項目明細：{item.name} <span className="text-base text-gray-500 font-normal">({item.barcode})</span>
+                            </h2>
+                            <p className="mb-4 text-sm text-gray-600">目前庫存：<span className="font-bold text-blue-600">{item.currentStock}</span> 件</p>
+                            
+                            <div className="overflow-x-auto border rounded-lg">
+                                <table className="min-w-full divide-y divide-gray-200">
+                                    <thead className="bg-gray-50">
+                                        <tr>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">狀態</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">購入價格</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">購入日期</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">記錄 ID</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="bg-white divide-y divide-gray-200">
+                                        {itemDetails.length === 0 ? (
+                                            <tr><td colSpan="4" className="px-6 py-4 text-center text-gray-500">無詳細入庫記錄。</td></tr>
+                                        ) : (
+                                            itemDetails.map((detail) => (
+                                                <tr key={detail.id} className={`${isItemOut(detail) ? 'bg-red-50' : 'hover:bg-gray-50'}`}>
+                                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                                        {item.currentStock > 0 ? (
+                                                            <span className="text-green-600">在庫</span>
+                                                        ) : (
+                                                            <span className="text-red-600">已出庫</span>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                                        {formatCurrency(detail.price, detail.currency)}
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                        {new Date(detail.created_at).toLocaleString()}
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-400">
+                                                        {detail.id.substring(0, 8)}...
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div className="p-4 bg-gray-50 border-t flex justify-end">
+                            <button
+                                onClick={onClose}
+                                className="px-6 py-2 bg-gray-300 text-gray-800 font-semibold rounded-lg hover:bg-gray-400 transition duration-300"
+                            >
+                                關閉
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
 
         // ----------------------------------------------------------------------
-        // 5. 應用程式主體：App 組件 (已修正所有表格名稱)
+        // 6. 應用程式主體：App 組件
         // ----------------------------------------------------------------------
         const App = () => {
             const [session, setSession] = useState(null);
             const [loading, setLoading] = useState(true);
-            const [activeTab, setActiveTab] = useState('inventory'); // 'inventory', 'stockout', 'add', 'settings'
+            const [activeTab, setActiveTab] = useState('inventory'); 
 
             // Data States
-            const [inventory, setInventory] = useState([]); // inventory_items 資料
+            const [inventory, setInventory] = useState([]); 
             const [stockOuts, setStockOuts] = useState([]);
-            const [settings, setSettings] = useState(null); // user_settings 資料
+            const [settings, setSettings] = useState(null); 
+            const [selectedItem, setSelectedItem] = useState(null); // ✅ 新增：用於明細彈窗
 
             // Derived State
             const userId = session?.user?.id || null;
-            const appId = SUPABASE_URL;
-
+            
             // 1. Supabase 身份驗證監聽
             useEffect(() => {
                 supabaseClient.auth.getSession().then(({ data: { session } }) => {
@@ -322,14 +398,14 @@
             }, []);
 
 
-            // 2. Supabase 即時數據訂閱 (✅ 最終修正 Realtime 表格名稱和 fetch 名稱)
+            // 2. Supabase 即時數據訂閱
             useEffect(() => {
                 if (!userId) return;
 
                 const fetchInitialData = async () => {
                     // Fetch Inventory Items (inventory_items table)
                     const { data: invData, error: invError } = await supabaseClient
-                        .from('inventory_items') // ✅ 正確名稱
+                        .from('inventory_items') 
                         .select('*')
                         .eq('user_id', userId);
                     if (invError) console.error("Error fetching inventory:", invError);
@@ -337,7 +413,7 @@
 
                     // Fetch Stock Outs (stock_outs table)
                     const { data: outData, error: outError } = await supabaseClient
-                        .from('stock_outs') // ✅ 正確名稱
+                        .from('stock_outs') 
                         .select('*')
                         .eq('user_id', userId);
                     if (outError) console.error("Error fetching stock outs:", outError);
@@ -345,7 +421,7 @@
 
                     // Fetch Settings (user_settings table)
                     const { data: settingsData, error: settingsError } = await supabaseClient
-                        .from('user_settings') // ✅ 正確名稱
+                        .from('user_settings') 
                         .select('*')
                         .eq('user_id', userId)
                         .maybeSingle(); 
@@ -368,7 +444,7 @@
                     .channel('inventory_changes')
                     .on(
                         'postgres_changes',
-                        { event: '*', schema: 'public', table: 'inventory_items', filter: `user_id=eq.${userId}` }, // ✅ Realtime 正確名稱
+                        { event: '*', schema: 'public', table: 'inventory_items', filter: `user_id=eq.${userId}` }, 
                         (payload) => {
                              fetchInitialData(); 
                         }
@@ -379,7 +455,7 @@
                     .channel('stock_outs_changes')
                     .on(
                         'postgres_changes',
-                        { event: '*', schema: 'public', table: 'stock_outs', filter: `user_id=eq.${userId}` }, // ✅ Realtime 正確名稱
+                        { event: '*', schema: 'public', table: 'stock_outs', filter: `user_id=eq.${userId}` }, 
                         (payload) => {
                              fetchInitialData(); 
                         }
@@ -390,7 +466,7 @@
                     .channel('settings_changes')
                     .on(
                         'postgres_changes',
-                        { event: '*', schema: 'public', table: 'user_settings', filter: `user_id=eq.${userId}` }, // ✅ Realtime 正確名稱
+                        { event: '*', schema: 'public', table: 'user_settings', filter: `user_id=eq.${userId}` }, 
                         (payload) => {
                              fetchInitialData(); 
                         }
@@ -422,10 +498,11 @@
             }
 
             // ----------------------------------------------------------------------
-            // 6. 組件 - 庫存概覽 (InventoryOverview) 
+            // 7. 組件 - 庫存概覽 (InventoryOverview) 
             // ----------------------------------------------------------------------
-            const InventoryOverview = ({ settings, inventory, stockOuts }) => {
+            const InventoryOverview = ({ settings, inventory, stockOuts, setSelectedItem }) => {
                 const [filterText, setFilterText] = useState('');
+                const [filterCategory, setFilterCategory] = useState('All'); // ✅ 新增：分類篩選狀態
                 const [sortKey, setSortKey] = useState('currentStock');
                 const [sortDirection, setSortDirection] = useState('desc');
 
@@ -434,10 +511,14 @@
                 const overviewData = useMemo(() => aggregateInventoryData(inventory, stockOuts), [inventory, stockOuts]);
 
                 const filteredAndSortedData = useMemo(() => {
-                    let data = overviewData.filter(item =>
-                        item.name.toLowerCase().includes(filterText.toLowerCase()) ||
-                        item.barcode.includes(filterText)
-                    );
+                    let data = overviewData.filter(item => {
+                        const textMatch = item.name.toLowerCase().includes(filterText.toLowerCase()) ||
+                                          item.barcode.includes(filterText);
+                        
+                        const categoryMatch = filterCategory === 'All' || item.category === filterCategory; // ✅ 應用分類篩選
+
+                        return textMatch && categoryMatch;
+                    });
 
                     data.sort((a, b) => {
                         const valA = a[sortKey];
@@ -453,7 +534,7 @@
                         return sortDirection === 'asc' ? comparison : comparison * -1;
                     });
                     return data;
-                }, [overviewData, filterText, sortKey, sortDirection]);
+                }, [overviewData, filterText, sortKey, sortDirection, filterCategory]); // ✅ 依賴 filterCategory
 
                 const handleSort = (key) => {
                     if (sortKey === key) {
@@ -479,13 +560,26 @@
                             <h3 className="text-xl font-semibold text-gray-800">
                                 總庫存價值: <span className="text-blue-600">{formatCurrency(totalValue, settings.currency)}</span>
                             </h3>
-                            <input
-                                type="text"
-                                placeholder="🔍 搜尋品名或條碼..."
-                                value={filterText}
-                                onChange={(e) => setFilterText(e.target.value)}
-                                className="p-2 border border-gray-300 rounded-lg w-64 focus:ring-blue-500 focus:border-blue-500"
-                            />
+                            <div className="flex gap-4">
+                                {/* 分類篩選器 (Select) ✅ 新增功能 */}
+                                <select
+                                    value={filterCategory}
+                                    onChange={(e) => setFilterCategory(e.target.value)}
+                                    className="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                >
+                                    <option value="All">所有分類</option>
+                                    {categories.map(cat => (
+                                        <option key={cat} value={cat}>{cat}</option>
+                                    ))}
+                                </select>
+                                <input
+                                    type="text"
+                                    placeholder="🔍 搜尋品名或條碼..."
+                                    value={filterText}
+                                    onChange={(e) => setFilterText(e.target.value)}
+                                    className="p-2 border border-gray-300 rounded-lg w-64 focus:ring-blue-500 focus:border-blue-500"
+                                />
+                            </div>
                         </div>
 
                         <div className="overflow-x-auto bg-white rounded-xl shadow-md">
@@ -520,7 +614,12 @@
                                     ) : (
                                         filteredAndSortedData.map((item) => (
                                             <tr key={item.barcode} className={`${item.currentStock === 0 ? 'bg-red-50 text-gray-500' : 'hover:bg-gray-50'}`}>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.name}</td>
+                                                <td 
+                                                    className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer underline" 
+                                                    onClick={() => setSelectedItem(item)} // ✅ 點擊時顯示明細
+                                                >
+                                                    {item.name}
+                                                </td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.barcode}</td>
                                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.category}</td>
                                                 <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold text-right ${item.currentStock === 0 ? 'text-red-600' : 'text-green-600'}`}>
@@ -543,13 +642,14 @@
             };
 
             // ----------------------------------------------------------------------
-            // 7. 組件 - 新增加 (AddItemForm) (已更新欄位名稱)
+            // 8. 組件 - 新增加 (AddItemForm) 
             // ----------------------------------------------------------------------
             const AddItemForm = ({ supabaseClient, userId, categories, defaultCurrency, onSuccess }) => {
                 const [name, setName] = useState('');
                 const [barcode, setBarcode] = useState('');
                 const [category, setCategory] = useState(categories[0] || '');
-                const [price, setPrice] = useState(0); // <-- 使用 price
+                const [price, setPrice] = useState(0); 
+                const [itemCurrency, setItemCurrency] = useState(defaultCurrency); // ✅ 新增：單件貨幣狀態
                 const [quantity, setQuantity] = useState(1);
                 const [message, setMessage] = useState('');
                 const [loading, setLoading] = useState(false);
@@ -570,19 +670,17 @@
                         name: name.trim(),
                         barcode: barcode.trim(),
                         category,
-                        price: parseFloat(price), // ✅ 使用 price 欄位
-                        currency: defaultCurrency, 
-                        // store 欄位省略
+                        price: parseFloat(price), 
+                        currency: itemCurrency, // ✅ 使用 itemCurrency
                     };
 
                     try {
-                        // 循環新增 quantity 次記錄，以模擬批量入庫
                         const itemsToInsert = Array.from({ length: parseInt(quantity, 10) }, () => ({
                             ...itemTemplate
                         }));
 
                         const { error } = await supabaseClient
-                            .from('inventory_items') // ✅ 正確名稱
+                            .from('inventory_items') 
                             .insert(itemsToInsert);
 
                         if (error) throw error;
@@ -591,10 +689,11 @@
                         setName('');
                         setBarcode('');
                         setPrice(0);
+                        setItemCurrency(defaultCurrency); // 重置
                         setQuantity(1);
                         setTimeout(() => {
                             setMessage('');
-                            onSuccess(); // 回到概覽頁
+                            onSuccess(); 
                         }, 3000);
 
                     } catch (err) {
@@ -609,18 +708,8 @@
                     <div className="p-6 bg-white shadow-xl rounded-2xl">
                         <h2 className="text-2xl font-bold mb-6 text-gray-800">新增庫存項目</h2>
                         <form onSubmit={handleSubmit} className="space-y-6">
-                            {/* 名稱 */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">品名 <span className="text-red-500">*</span></label>
-                                <input
-                                    type="text"
-                                    value={name}
-                                    onChange={(e) => setName(e.target.value)}
-                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
-                                    placeholder="輸入商品名稱"
-                                    required
-                                />
-                            </div>
+                            {/* 名稱, 條碼, 類別 (不變) */}
+                            {/* ... (略) ... */}
 
                             {/* 條碼與掃描 */}
                             <div>
@@ -644,6 +733,19 @@
                                     </button>
                                 </div>
                             </div>
+                            
+                            {/* 名稱 */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">品名 <span className="text-red-500">*</span></label>
+                                <input
+                                    type="text"
+                                    value={name}
+                                    onChange={(e) => setName(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                    placeholder="輸入商品名稱"
+                                    required
+                                />
+                            </div>
 
                             {/* 類別 */}
                             <div>
@@ -662,7 +764,7 @@
                             <div className="flex space-x-4">
                                 {/* 成本 (Price) */}
                                 <div className="flex-1">
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">單件成本/購入價格 ({defaultCurrency}) <span className="text-red-500">*</span></label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">單件成本/購入價格 <span className="text-red-500">*</span></label>
                                     <input
                                         type="number"
                                         min="0"
@@ -672,6 +774,21 @@
                                         className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
                                         required
                                     />
+                                </div>
+
+                                {/* 貨幣選擇 (Select) ✅ 新增功能 */}
+                                <div className="w-1/4"> 
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">貨幣 <span className="text-red-500">*</span></label>
+                                    <select
+                                        value={itemCurrency}
+                                        onChange={(e) => setItemCurrency(e.target.value)}
+                                        className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                        required
+                                    >
+                                        {COMMON_CURRENCIES.map(code => (
+                                            <option key={code} value={code}>{code}</option>
+                                        ))}
+                                    </select>
                                 </div>
 
                                 {/* 數量 */}
@@ -728,7 +845,7 @@
             };
 
             // ----------------------------------------------------------------------
-            // 8. 組件 - 設定面板 (SettingsPanel) (已更新表格名稱)
+            // 9. 組件 - 設定面板 (SettingsPanel) 
             // ----------------------------------------------------------------------
             const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab }) => {
                 const [categoriesInput, setCategoriesInput] = useState(
@@ -761,7 +878,7 @@
 
                     try {
                         const { error } = await supabaseClient
-                            .from('user_settings') // ✅ 正確名稱
+                            .from('user_settings') 
                             .upsert(newSettings, { onConflict: 'user_id' }); 
 
                         if (error) throw error;
@@ -781,27 +898,28 @@
                         <h2 className="text-2xl font-bold text-gray-800 border-b pb-4">應用程式設定</h2>
 
                         <form onSubmit={handleSubmit} className="space-y-6">
-                            {/* 貨幣設定 */}
+                            {/* 貨幣設定 - 使用下拉選單 ✅ 恢復功能 */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">
                                     預設貨幣代碼 (用於成本/總值)
                                 </label>
-                                <input
-                                    type="text"
+                                <select
                                     value={currency}
-                                    onChange={(e) => setCurrency(e.target.value.toUpperCase().trim())}
-                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 uppercase"
-                                    placeholder="例如：USD, TWD, HKD"
-                                    maxLength="3"
+                                    onChange={(e) => setCurrency(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
                                     required
-                                />
-                                <p className="mt-1 text-xs text-gray-500">請使用三位字母代碼 (如 TWD, USD, HKD)。</p>
+                                >
+                                    {COMMON_CURRENCIES.map(code => (
+                                        <option key={code} value={code}>{code}</option>
+                                    ))}
+                                </select>
+                                <p className="mt-1 text-xs text-gray-500">請選擇三位字母代碼。</p>
                             </div>
 
-                            {/* 類別設定 */}
+                            {/* 類別設定 - 保持 TEXTAREA，但優化說明 ✅ 恢復功能 */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                                    庫存類別列表 (以逗號分隔)
+                                    庫存類別列表 (以逗號分隔，例如：電子產品, 服裝)
                                 </label>
                                 <textarea
                                     rows="3"
@@ -832,7 +950,7 @@
                         {/* 帳戶操作 */}
                         <div className="border-t pt-6 mt-6 space-y-4">
                             <h3 className="text-xl font-semibold text-gray-800">帳戶管理</h3>
-                            <p className="text-sm text-gray-600">應用程式 ID/Supabase URL: <code className="bg-gray-200 p-1 rounded text-xs">{SUPABASE_URL}</code></p>
+                            <p className="text-sm text-gray-600">應用程式 ID/Supabase URL: <code className="bg-gray-200 p-1 rounded text-xs">...</code></p>
                             <button
                                 onClick={handleLogout}
                                 className="w-full py-2 px-4 bg-red-500 text-white font-semibold rounded-lg shadow-md hover:bg-red-600 transition duration-300"
@@ -846,7 +964,7 @@
 
 
             // ----------------------------------------------------------------------
-            // 9. 主應用程式介面 (Main UI) (與原版相同)
+            // 10. 主應用程式介面 (Main UI)
             // ----------------------------------------------------------------------
             return (
                 <div className="min-h-screen flex flex-col">
@@ -908,7 +1026,6 @@
                         </div>
 
                         <div className="mt-6">
-                        {/* 渲染選中的組件 */}
                         {activeTab === 'add' && settings && (
                             <AddItemForm 
                                 supabaseClient={supabaseClient} 
@@ -924,6 +1041,7 @@
                                 settings={settings}
                                 inventory={inventory}
                                 stockOuts={stockOuts}
+                                setSelectedItem={setSelectedItem} // ✅ 傳遞 setSelectedItem
                             />
                         )}
                         
@@ -947,6 +1065,17 @@
                             />
                         )}
                         </div>
+
+                        {/* 明細彈窗渲染 ✅ 新增渲染邏輯 */}
+                        {selectedItem && (
+                            <DetailModal
+                                item={selectedItem}
+                                inventory={inventory}
+                                stockOuts={stockOuts}
+                                onClose={() => setSelectedItem(null)}
+                                settings={settings}
+                            />
+                        )}
                     </main>
 
                     <footer className="py-4 text-center text-sm text-gray-500">
@@ -957,7 +1086,7 @@
         };
 
         // ----------------------------------------------------------------------
-        // 10. 組件 - 出庫頁面 (StockOutPage) (表格名稱正確)
+        // 11. 組件 - 出庫頁面 (StockOutPage) 
         // ----------------------------------------------------------------------
         const StockOutPage = ({ supabaseClient, userId, inventory, stockOuts, setActiveTab }) => {
             const [barcode, setBarcode] = useState('');
@@ -976,7 +1105,7 @@
                         if (!map[item.name]) {
                             map[item.name] = item.barcode;
                         } else if (map[item.name] !== item.barcode) {
-                            map[item.name] = null; // 同名稱但不同條碼 → 標記為衝突（不自動填）
+                            map[item.name] = null; 
                         }
                     }
                 });
@@ -1048,7 +1177,7 @@
 
                 try {
                     const { error } = await supabaseClient
-                        .from('stock_outs') // ✅ 正確名稱
+                        .from('stock_outs') 
                         .insert([newStockOut]);
 
                     if (error) throw error;
