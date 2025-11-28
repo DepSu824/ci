@@ -97,7 +97,7 @@
             return formatter.format(amount);
         };
 
-        // 聚合庫存數據 (已更新使用 item.price 而非 item.cost)
+        // 聚合庫存數據 (已更新使用 item.price 而非 item.cost，並假設每行是一個 item)
         const aggregateInventoryData = (inventory = [], stockOuts = []) => {
             const grouped = {};
             const stockOutMap = {};
@@ -125,7 +125,8 @@
                         currentStock: 0,
                     };
                 }
-                grouped[key].totalInStock += 1; // 假設 inventory_items 每一行是一件商品（如果不是，則需要 item 中包含 quantity 欄位，但您 schema 中沒有）
+                // 由於 inventory_items 中沒有 quantity，我們假設每一行代表 1 件商品
+                grouped[key].totalInStock += 1; 
                 grouped[key].totalCost += itemCost;
             });
 
@@ -287,7 +288,7 @@
 
 
         // ----------------------------------------------------------------------
-        // 5. 應用程式主體：App 組件 (已更新表格名稱)
+        // 5. 應用程式主體：App 組件 (已修正所有表格名稱)
         // ----------------------------------------------------------------------
         const App = () => {
             const [session, setSession] = useState(null);
@@ -321,14 +322,14 @@
             }, []);
 
 
-            // 2. Supabase 即時數據訂閱 (已更新表格名稱)
+            // 2. Supabase 即時數據訂閱 (✅ 最終修正 Realtime 表格名稱和 fetch 名稱)
             useEffect(() => {
                 if (!userId) return;
 
                 const fetchInitialData = async () => {
                     // Fetch Inventory Items (inventory_items table)
                     const { data: invData, error: invError } = await supabaseClient
-                        .from('inventory_items') // <-- 表格名稱修正
+                        .from('inventory_items') // ✅ 正確名稱
                         .select('*')
                         .eq('user_id', userId);
                     if (invError) console.error("Error fetching inventory:", invError);
@@ -336,7 +337,7 @@
 
                     // Fetch Stock Outs (stock_outs table)
                     const { data: outData, error: outError } = await supabaseClient
-                        .from('stock_outs') // <-- 表格名稱一致
+                        .from('stock_outs') // ✅ 正確名稱
                         .select('*')
                         .eq('user_id', userId);
                     if (outError) console.error("Error fetching stock outs:", outError);
@@ -344,17 +345,17 @@
 
                     // Fetch Settings (user_settings table)
                     const { data: settingsData, error: settingsError } = await supabaseClient
-                        .from('user_settings') // <-- 表格名稱修正
+                        .from('user_settings') // ✅ 正確名稱
                         .select('*')
                         .eq('user_id', userId)
-                        .maybeSingle(); // 使用 maybeSingle 處理 0 或 1 筆結果
+                        .maybeSingle(); 
                         
                     if (settingsError && settingsError.code !== 'PGRST116') { 
                          console.error("Error fetching settings:", settingsError);
                     } else if (settingsData) {
                         setSettings(settingsData);
                     } else {
-                         // Default settings for new user (使用 schema 預設值)
+                         // Default settings for new user
                          setSettings({ categories: ['電子產品', '服裝', '食品', '書籍', '其他'], currency: 'HKD', user_id: userId });
                     }
                 };
@@ -367,7 +368,7 @@
                     .channel('inventory_changes')
                     .on(
                         'postgres_changes',
-                        { event: '*', schema: 'public', table: 'inventory_items', filter: `user_id=eq.${userId}` }, // <-- 表格名稱修正
+                        { event: '*', schema: 'public', table: 'inventory_items', filter: `user_id=eq.${userId}` }, // ✅ Realtime 正確名稱
                         (payload) => {
                              fetchInitialData(); 
                         }
@@ -378,7 +379,7 @@
                     .channel('stock_outs_changes')
                     .on(
                         'postgres_changes',
-                        { event: '*', schema: 'public', table: 'stock_outs', filter: `user_id=eq.${userId}` }, // <-- 表格名稱一致
+                        { event: '*', schema: 'public', table: 'stock_outs', filter: `user_id=eq.${userId}` }, // ✅ Realtime 正確名稱
                         (payload) => {
                              fetchInitialData(); 
                         }
@@ -389,7 +390,7 @@
                     .channel('settings_changes')
                     .on(
                         'postgres_changes',
-                        { event: '*', schema: 'public', table: 'user_settings', filter: `user_id=eq.${userId}` }, // <-- 表格名稱修正
+                        { event: '*', schema: 'public', table: 'user_settings', filter: `user_id=eq.${userId}` }, // ✅ Realtime 正確名稱
                         (payload) => {
                              fetchInitialData(); 
                         }
@@ -428,7 +429,6 @@
                 const [sortKey, setSortKey] = useState('currentStock');
                 const [sortDirection, setSortDirection] = useState('desc');
 
-                // 修正：settings.categories 在 Supabase 中是 TEXT[]，需檢查是否為陣列
                 const categories = Array.isArray(settings.categories) ? settings.categories : (settings.categories || '').split(',').map(s => s.trim());
                 
                 const overviewData = useMemo(() => aggregateInventoryData(inventory, stockOuts), [inventory, stockOuts]);
@@ -549,15 +549,12 @@
                 const [name, setName] = useState('');
                 const [barcode, setBarcode] = useState('');
                 const [category, setCategory] = useState(categories[0] || '');
-                const [price, setPrice] = useState(0); // <-- 變更為 price
-                const [quantity, setQuantity] = useState(1); // quantity 不再使用，但保留輸入框
+                const [price, setPrice] = useState(0); // <-- 使用 price
+                const [quantity, setQuantity] = useState(1);
                 const [message, setMessage] = useState('');
                 const [loading, setLoading] = useState(false);
                 const [showScanner, setShowScanner] = useState(false);
                 
-                // 由於您的 inventory_items 表格中沒有 quantity 欄位，我假設每次入庫記錄是一件商品。
-                // 但為了維持功能一致性，我們將 quantity 欄位保留在 UI 上，並在入庫時循環新增。
-
                 const handleSubmit = async (e) => {
                     e.preventDefault();
                     if (!name || !barcode || quantity <= 0 || price < 0) {
@@ -573,9 +570,9 @@
                         name: name.trim(),
                         barcode: barcode.trim(),
                         category,
-                        price: parseFloat(price), // <-- 使用 price 欄位
-                        currency: defaultCurrency, // <-- 使用 settings 中的 currency
-                        // store 欄位省略，若需要請在 UI 中加入
+                        price: parseFloat(price), // ✅ 使用 price 欄位
+                        currency: defaultCurrency, 
+                        // store 欄位省略
                     };
 
                     try {
@@ -585,7 +582,7 @@
                         }));
 
                         const { error } = await supabaseClient
-                            .from('inventory_items') // <-- 表格名稱修正
+                            .from('inventory_items') // ✅ 正確名稱
                             .insert(itemsToInsert);
 
                         if (error) throw error;
@@ -670,8 +667,8 @@
                                         type="number"
                                         min="0"
                                         step="0.01"
-                                        value={price} // <-- 使用 price
-                                        onChange={(e) => setPrice(e.target.value)} // <-- 使用 setPrice
+                                        value={price}
+                                        onChange={(e) => setPrice(e.target.value)}
                                         className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
                                         required
                                     />
@@ -764,7 +761,7 @@
 
                     try {
                         const { error } = await supabaseClient
-                            .from('user_settings') // <-- 表格名稱修正
+                            .from('user_settings') // ✅ 正確名稱
                             .upsert(newSettings, { onConflict: 'user_id' }); 
 
                         if (error) throw error;
@@ -960,7 +957,7 @@
         };
 
         // ----------------------------------------------------------------------
-        // 10. 組件 - 出庫頁面 (StockOutPage) (已更新表格名稱)
+        // 10. 組件 - 出庫頁面 (StockOutPage) (表格名稱正確)
         // ----------------------------------------------------------------------
         const StockOutPage = ({ supabaseClient, userId, inventory, stockOuts, setActiveTab }) => {
             const [barcode, setBarcode] = useState('');
@@ -1051,7 +1048,7 @@
 
                 try {
                     const { error } = await supabaseClient
-                        .from('stock_outs') // <-- 表格名稱一致
+                        .from('stock_outs') // ✅ 正確名稱
                         .insert([newStockOut]);
 
                     if (error) throw error;
