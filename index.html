@@ -1656,9 +1656,9 @@
             // ----------------------------------------------------------------------
             // 11. 組件 - 設定面板 (SettingsPanel) 
             // ----------------------------------------------------------------------
-            // 📌 接受 supportedCurrencies 作為 Prop
-            const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab, supportedCurrencies }) => {
-                // 📌 修正：改用列表管理方式
+            // 📌 修正：新增 onSettingsSaved prop
+            const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab, supportedCurrencies, onSettingsSaved }) => {
+                
                 const [categories, setCategories] = useState(currentSettings.categories || []);
                 const [newCategoryName, setNewCategoryName] = useState('');
 
@@ -1685,7 +1685,6 @@
                     setLoading(true);
                     setMessage('');
 
-                    // 📌 修正：直接使用 categories 陣列
                     if (categories.length === 0) {
                         setMessage('類別列表不能為空。');
                         setLoading(false);
@@ -1694,7 +1693,7 @@
 
                     const newSettings = {
                         user_id: userId,
-                        categories: categories, // 📌 直接傳遞陣列
+                        categories: categories, 
                         currency: currency,
                     };
 
@@ -1706,6 +1705,8 @@
                         if (error) throw error;
 
                         setMessage('設定已成功儲存！');
+                        // 📌 修正點：在成功儲存後，立即通知父組件（App）刷新數據
+                        onSettingsSaved(); 
                         setTimeout(() => setMessage(''), 3000);
                     } catch (error) { // 更改錯誤變數名稱
                         console.error("Supabase Settings Error:", error);
@@ -2144,6 +2145,7 @@
                                 handleLogout={handleLogout} 
                                 setActiveTab={setActiveTab}
                                 supportedCurrencies={supportedCurrencies} // 📌 傳遞貨幣列表
+                                onSettingsSaved={fetchInitialData} // 📌 修正點：傳遞刷新函式
                             />
                         )}
                         </div>
