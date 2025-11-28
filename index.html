@@ -78,7 +78,7 @@
         // ----------------------------------------------------------------------
         const SUPABASE_URL = 'https://edtoegcycroomrcebywq.supabase.co';
         const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVkdG9lZ2N5Y3Jvb21yY2VieXdxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQyMjczMzcsImV4cCI6MjA3OTgwMzMzN30.PFVzPDIhxrxW47lDaUW-3aQtD_QbwJcn2muENJRra_s';
-        const COMMON_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'HKD', 'TWD', 'CNY', 'VND', 'SGD']; // ✅ 新增常用貨幣列表
+        const COMMON_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'HKD', 'TWD', 'CNY', 'VND', 'SGD']; 
 
         const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -88,15 +88,30 @@
 
         // 格式化貨幣
         const formatCurrency = (amount, currencyCode = 'USD') => {
-            if (typeof amount !== 'number') return '';
-            const formatter = new Intl.NumberFormat('en-US', {
-                style: 'currency',
-                currency: currencyCode,
-                minimumFractionDigits: 0,
-                maximumFractionDigits: 2,
-            });
-            return formatter.format(amount);
+            if (typeof amount !== 'number' || isNaN(amount)) return '';
+            try {
+                const formatter = new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: currencyCode,
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 2,
+                });
+                return formatter.format(amount);
+            } catch (e) {
+                return `${currencyCode} ${amount.toFixed(2)}`;
+            }
         };
+
+        // 格式化時間戳
+        const formatTimestamp = (timestamp) => {
+            if (!timestamp) return '-';
+            try {
+                return new Date(timestamp).toLocaleString();
+            } catch (e) {
+                return timestamp; // 返回原始值以防解析錯誤
+            }
+        };
+
 
         // 聚合庫存數據
         const aggregateInventoryData = (inventory = [], stockOuts = []) => {
@@ -127,11 +142,19 @@
                 }
                 grouped[key].totalInStock += 1; 
                 grouped[key].totalCost += itemCost;
+                grouped[key].category = item.category; // 使用最新的 category
+                grouped[key].name = item.name; // 使用最新的 name
             });
 
             // 3. 計算平均成本和剩餘庫存
             Object.values(grouped).forEach(item => {
+                // 修正：計算平均成本不應該只基於 totalInStock（數量永遠為 1），而是基於實際購入的記錄數量
+                const uniquePurchaseRecords = inventory.filter(inv => inv.barcode === item.barcode);
+                item.totalInStock = uniquePurchaseRecords.length;
+                item.totalCost = uniquePurchaseRecords.reduce((sum, rec) => sum + (rec.price || 0), 0);
+                
                 item.avgCost = item.totalInStock > 0 ? item.totalCost / item.totalInStock : 0;
+                
                 const totalOut = stockOutMap[item.barcode] || 0;
                 item.currentStock = item.totalInStock - totalOut;
             });
@@ -284,73 +307,489 @@
         };
 
         // ----------------------------------------------------------------------
-        // 5. 詳細明細彈窗 (DetailModal) ✅ 新增功能
+        // 5. 單筆交易編輯/刪除組件 (TransactionRow)
         // ----------------------------------------------------------------------
-        const DetailModal = ({ item, inventory, stockOuts, onClose, settings }) => {
-            const itemDetails = inventory.filter(inv => inv.barcode === item.barcode)
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); // 按時間降序排列
+        const TransactionRow = ({ record, onUpdated, userId }) => {
+            const [isEditing, setIsEditing] = useState(false);
+            const [editData, setEditData] = useState({
+                price: record.price || 0,
+                currency: record.currency || 'HKD',
+                store: record.store || '', // Supabase 使用 store 欄位
+                quantity: Math.abs(record.quantity),
+            });
+            const [saving, setSaving] = useState(false);
+            const [message, setMessage] = useState('');
 
-            const isStockOut = (inventoryItem) => {
-                // 這是簡化的邏輯。在更複雜的系統中，您需要追蹤每個入庫 ID 的出庫情況。
-                // 這裡我們只顯示原始入庫列表。
-                return false; 
+            const isPurchase = record.type === 'PURCHASE';
+            const tableName = isPurchase ? 'inventory_items' : 'stock_outs';
+
+            // 處理儲存單筆紀錄
+            const handleSave = async () => {
+                if (isPurchase && (editData.price < 0 || !editData.currency)) {
+                    setMessage('單價與貨幣為必填');
+                    return;
+                }
+                if (!isPurchase && (editData.quantity <= 0)) {
+                    setMessage('出庫數量必須大於 0');
+                    return;
+                }
+                setSaving(true);
+                setMessage('');
+                try {
+                    const updateObj = isPurchase
+                        ? {
+                            price: parseFloat(editData.price),
+                            currency: editData.currency.toUpperCase().trim(),
+                            store: editData.store.trim() || null,
+                          }
+                        : { quantity: parseInt(editData.quantity) };
+                    
+                    const { error } = await supabaseClient
+                        .from(tableName) 
+                        .update(updateObj)
+                        .eq('id', record.id)
+                        .eq('user_id', userId); 
+
+                    if (error) throw error;
+                    setMessage('已更新！');
+                    setIsEditing(false);
+                    onUpdated?.(); // 通知父層刷新數據
+                } catch (err) {
+                    console.error(err);
+                    setMessage('更新失敗');
+                } finally {
+                    setSaving(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
             };
 
-            const isItemOut = (inventoryItem) => {
-                // 為了模擬，我們假設任何已經 aggregated out 的 item 在這裡都是 "出庫"
-                const outCount = stockOuts.filter(out => out.barcode === item.barcode).reduce((sum, out) => sum + out.quantity, 0);
-                return outCount > 0;
+            // 處理刪除單筆紀錄
+            const handleDelete = async () => {
+                if (!window.confirm(`確定要永久刪除這筆${isPurchase ? '購入' : '出庫'}紀錄嗎？`)) return;
+                setSaving(true);
+                setMessage('');
+                try {
+                    const { error } = await supabaseClient
+                        .from(tableName) 
+                        .delete()
+                        .eq('id', record.id)
+                        .eq('user_id', userId);
+
+                    if (error) throw error;
+                    setMessage('已刪除！');
+                    onUpdated?.();
+                } catch (err) {
+                    console.error(err);
+                    setMessage('刪除失敗');
+                } finally {
+                    setSaving(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
+            };
+
+            if (isEditing) {
+                return (
+                    <tr className="bg-yellow-50">
+                        <td className="px-4 py-2"><span className={`px-2 py-1 text-xs rounded-full ${isPurchase ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>{isPurchase ? '購入' : '出庫'}</span></td>
+                        <td className="px-4 py-2">
+                            {isPurchase ? '+1' : (
+                                <input type="number" min="1" value={editData.quantity} onChange={e => setEditData({ ...editData, quantity: e.target.value })} className="w-20 px-2 py-1 border rounded" />
+                            )}
+                        </td>
+                        <td className="px-4 py-2">
+                            {isPurchase ? (
+                                <input type="number" step="0.01" value={editData.price} onChange={e => setEditData({ ...editData, price: e.target.value })} className="w-24 px-2 py-1 border rounded" />
+                            ) : '-'}
+                        </td>
+                        <td className="px-4 py-2">
+                            {isPurchase ? (
+                                <select value={editData.currency} onChange={e => setEditData({ ...editData, currency: e.target.value })} className="px-2 py-1 border rounded text-sm">
+                                    {COMMON_CURRENCIES.map(code => (<option key={code} value={code}>{code}</option>))}
+                                </select>
+                            ) : '-'}
+                        </td>
+                        <td className="px-4 py-2">
+                            {isPurchase ? (
+                                <input type="text" value={editData.store} onChange={e => setEditData({ ...editData, store: e.target.value })} className="w-full px-2 py-1 border rounded" placeholder="店名或其他備註" />
+                            ) : record.store}
+                        </td>
+                        <td className="px-4 py-2 text-xs text-gray-500">{formatTimestamp(record.created_at)}</td>
+                        <td className="px-4 py-2 text-xs">
+                            <div className="flex items-center gap-2">
+                                <button onClick={handleSave} disabled={saving} className="text-green-600 font-bold hover:text-green-800">儲存</button>
+                                <button onClick={() => setIsEditing(false)} className="text-gray-500 hover:text-gray-700">取消</button>
+                            </div>
+                            {message && <span className="block text-xs mt-1 text-green-600">{message}</span>}
+                        </td>
+                    </tr>
+                );
             }
+
+            // 一般顯示模式
+            return (
+                <tr className="hover:bg-gray-50">
+                    <td className="px-4 py-2">
+                        <span className={`px-2 py-1 text-xs rounded-full ${isPurchase ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                            {isPurchase ? '購入' : '出庫'}
+                        </span>
+                    </td>
+                    <td className={`px-4 py-2 font-semibold ${record.type === 'PURCHASE' ? 'text-green-700' : 'text-red-700'}`}>
+                        {record.type === 'PURCHASE' ? '+1' : `-${record.quantity}`}
+                    </td>
+                    <td className="px-4 py-2">
+                        {record.type === 'PURCHASE' ? (
+                            record.price > 0 ? (
+                                <span className="font-medium text-green-700">
+                                    {formatCurrency(record.price, record.currency)}
+                                </span>
+                            ) : (
+                                <span className="text-purple-600 font-medium">贈品</span>
+                            )
+                        ) : (
+                            <span className="text-gray-400">-</span>
+                        )}
+                    </td>
+                    <td className="px-4 py-2">{record.currency || '-'}</td>
+                    <td className="px-4 py-2">{record.store || '-'}</td>
+                    <td className="px-4 py-2 text-xs text-gray-500">{formatTimestamp(record.created_at)}</td>
+                    <td className="px-4 py-2 text-xs">
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={() => setIsEditing(true)}
+                                className="text-blue-600 hover:text-blue-800 font-medium"
+                            >
+                                編輯
+                            </button>
+                            <button
+                                onClick={handleDelete}
+                                className="text-red-600 hover:text-red-800 font-medium"
+                            >
+                                刪除
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            );
+        };
+
+        // ----------------------------------------------------------------------
+        // 6. 詳細明細彈窗 (DetailModal) - 包含所有編輯功能
+        // ----------------------------------------------------------------------
+        const DetailModal = ({ item, inventory, stockOuts, onClose, settings, userId, refreshData }) => {
+            const [loading, setLoading] = useState(false);
+            const [message, setMessage] = useState('');
+
+            // 編輯狀態
+            const [isEditingName, setIsEditingName] = useState(false);
+            const [isEditingBarcode, setIsEditingBarcode] = useState(false);
+            const [isEditingCategory, setIsEditingCategory] = useState(false);
+            const [editName, setEditName] = useState(item.name);
+            const [editBarcode, setEditBarcode] = useState(item.barcode);
+            const [editCategory, setEditCategory] = useState(item.category);
+            const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+            
+            // 處理交易記錄
+            const transactionHistory = useMemo(() => {
+                const purchases = inventory
+                    .filter(rec => rec.barcode === item.barcode)
+                    .map(rec => ({
+                        id: rec.id, type: 'PURCHASE', quantity: 1, price: rec.price, currency: rec.currency, store: rec.store, created_at: rec.created_at,
+                    }));
+                const stockOutsForBarcode = stockOuts
+                    .filter(out => out.barcode === item.barcode)
+                    .map(out => ({
+                        id: out.id, type: 'STOCK_OUT', quantity: out.quantity, price: 0, currency: settings.currency, store: out.store, created_at: out.created_at,
+                    }));
+                
+                // 合併並按時間降序排列 (Supabase 使用 created_at)
+                return [...purchases, ...stockOutsForBarcode].sort((a, b) => {
+                    return new Date(b.created_at) - new Date(a.created_at);
+                });
+            }, [inventory, stockOuts, item.barcode, settings.currency]);
+
+
+            // ── 1. 修改名稱 ─────────────────────────────────────
+            const handleUpdateName = async () => {
+                if (editName.trim() === '' || editName === item.name) {
+                    setIsEditingName(false);
+                    return;
+                }
+                setLoading(true);
+                setMessage('');
+                try {
+                    // Supabase 批次更新: 使用 UPDATE FROM 來更新所有匹配的記錄 (由於 Supabase 不支援真正的批次操作，我們用一個 UPDATE 搭配 EQ 即可)
+                    const { error: invError } = await supabaseClient
+                        .from('inventory_items')
+                        .update({ name: editName.trim() })
+                        .eq('barcode', item.barcode)
+                        .eq('user_id', userId);
+                    
+                    if (invError) throw invError;
+                    
+                    // 同步更新 stock_outs 的名稱 (可選, 保持數據一致性)
+                    await supabaseClient
+                        .from('stock_outs')
+                        .update({ name: editName.trim() })
+                        .eq('barcode', item.barcode)
+                        .eq('user_id', userId);
+
+                    setMessage('項目名稱已更新！');
+                    setIsEditingName(false);
+                    refreshData?.(); // 通知父層重新整理
+                } catch (err) {
+                    console.error(err);
+                    setMessage('更新名稱失敗');
+                } finally {
+                    setLoading(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
+            };
+
+            // ── 2. 修改條碼（全部相關記錄一起改） ───────────────────────
+            const handleUpdateBarcode = async () => {
+                const newBarcode = editBarcode.trim();
+                if (newBarcode === '' || newBarcode === item.barcode) {
+                    setIsEditingBarcode(false);
+                    return;
+                }
+                setLoading(true);
+                setMessage('');
+                try {
+                    // 1. 更新所有 inventory_items
+                    const { error: invError } = await supabaseClient
+                        .from('inventory_items')
+                        .update({ barcode: newBarcode })
+                        .eq('barcode', item.barcode)
+                        .eq('user_id', userId);
+                    if (invError) throw invError;
+
+                    // 2. 更新所有 stock_outs
+                    const { error: outError } = await supabaseClient
+                        .from('stock_outs')
+                        .update({ barcode: newBarcode })
+                        .eq('barcode', item.barcode)
+                        .eq('user_id', userId);
+                    if (outError) throw outError;
+
+                    setMessage(`條碼已變更為 ${newBarcode}！`);
+                    setIsEditingBarcode(false);
+                    refreshData?.();
+                    // 由於條碼變更，需要關閉 modal 並刷新整個 overview 頁面，才能看到新的聚合數據
+                    onClose(); 
+                } catch (err) {
+                    console.error(err);
+                    setMessage('變更條碼失敗');
+                } finally {
+                    setLoading(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
+            };
+            
+            // ── 3. 修改分類（全部相關記錄一起改） ───────────────────────
+            const handleUpdateCategory = async () => {
+                if (editCategory === item.category) {
+                    setIsEditingCategory(false);
+                    return;
+                }
+                setLoading(true);
+                setMessage('');
+                try {
+                    // 由於 category 只存在於 inventory_items 中，只需更新該表
+                    const { error } = await supabaseClient
+                        .from('inventory_items')
+                        .update({ category: editCategory })
+                        .eq('barcode', item.barcode)
+                        .eq('user_id', userId);
+
+                    if (error) throw error;
+                    
+                    setMessage('分類已更新！');
+                    setIsEditingCategory(false);
+                    refreshData?.();
+                } catch (err) {
+                    console.error(err);
+                    setMessage('更新分類失敗');
+                } finally {
+                    setLoading(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
+            };
+
+
+            // ── 4. 刪除整個條碼項目 ───────────────────────
+            const handleDeleteAll = async () => {
+                if (!window.confirm('⚠️ 確定要「永久刪除」這個條碼的所有購入與出庫紀錄嗎？\n此動作無法復原！')) return;
+
+                setLoading(true);
+                setMessage('');
+
+                try {
+                    // 1. 刪除所有 inventory_items
+                    const { error: invError } = await supabaseClient
+                        .from('inventory_items')
+                        .delete()
+                        .eq('barcode', item.barcode)
+                        .eq('user_id', userId);
+                    if (invError) throw invError;
+
+                    // 2. 刪除所有 stock_outs
+                    const { error: outError } = await supabaseClient
+                        .from('stock_outs')
+                        .delete()
+                        .eq('barcode', item.barcode)
+                        .eq('user_id', userId);
+                    if (outError) throw outError;
+
+                    setMessage('已永久刪除此條碼的所有紀錄！');
+                    onClose(); // 關閉 modal
+                    refreshData?.(); // 刷新主列表
+                } catch (err) {
+                    console.error("刪除失敗:", err);
+                    setMessage('刪除失敗：' + err.message);
+                } finally {
+                    setLoading(false);
+                    setShowDeleteConfirm(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
+            };
+
 
             return (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
                         <div className="p-6">
-                            <h2 className="text-2xl font-bold mb-2 text-gray-800">
-                                項目明細：{item.name} <span className="text-base text-gray-500 font-normal">({item.barcode})</span>
-                            </h2>
-                            <p className="mb-4 text-sm text-gray-600">目前庫存：<span className="font-bold text-blue-600">{item.currentStock}</span> 件</p>
                             
+                            {/* 頂部標題與控制項 */}
+                            <div className="flex justify-between items-start border-b pb-4 mb-4">
+                                <div>
+                                    <h2 className="text-2xl font-bold text-gray-800">
+                                        項目明細：
+                                        {isEditingName ? (
+                                            <input 
+                                                value={editName} 
+                                                onChange={(e) => setEditName(e.target.value)}
+                                                onBlur={handleUpdateName}
+                                                onKeyDown={(e) => {if (e.key === 'Enter') handleUpdateName()}}
+                                                className="border-b border-blue-500 p-1 text-xl font-bold inline-block w-60"
+                                                autoFocus
+                                            />
+                                        ) : (
+                                            <span 
+                                                className="cursor-pointer hover:bg-yellow-100 p-1 rounded transition"
+                                                onClick={() => {setEditName(item.name); setIsEditingName(true);}}
+                                            >
+                                                {item.name}
+                                            </span>
+                                        )}
+                                    </h2>
+                                    <p className="text-sm text-gray-600 mt-1">
+                                        條碼: 
+                                        {isEditingBarcode ? (
+                                            <input 
+                                                value={editBarcode} 
+                                                onChange={(e) => setEditBarcode(e.target.value)}
+                                                onBlur={handleUpdateBarcode}
+                                                onKeyDown={(e) => {if (e.key === 'Enter') handleUpdateBarcode()}}
+                                                className="border-b border-blue-500 p-1 text-sm inline-block w-40"
+                                                autoFocus
+                                            />
+                                        ) : (
+                                            <span 
+                                                className="cursor-pointer hover:bg-yellow-100 p-1 rounded transition"
+                                                onClick={() => {setEditBarcode(item.barcode); setIsEditingBarcode(true);}}
+                                            >
+                                                {item.barcode}
+                                            </span>
+                                        )}
+                                    </p>
+                                </div>
+                                <button onClick={onClose} className="text-gray-500 hover:text-gray-700 text-3xl leading-none">×</button>
+                            </div>
+
+                            {message && (
+                                <p className={`mb-4 p-3 text-sm rounded-lg ${message.includes('成功') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                    {message}
+                                </p>
+                            )}
+                            
+                            {/* 總覽資訊區塊 */}
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 text-center">
+                                <div className="p-4 bg-blue-50 rounded-lg">
+                                    <p className="text-xs text-gray-600">現有庫存</p>
+                                    <p className="text-2xl font-bold text-blue-800">{item.currentStock}</p>
+                                </div>
+                                <div className="p-4 bg-green-50 rounded-lg">
+                                    <p className="text-xs text-gray-600">平均成本</p>
+                                    <p className="text-xl font-bold text-green-800">{formatCurrency(item.avgCost, settings.currency)}</p>
+                                </div>
+                                <div className="p-4 bg-gray-50 rounded-lg flex flex-col justify-center">
+                                    <p className="text-xs text-gray-600">分類</p>
+                                    {isEditingCategory ? (
+                                        <select
+                                            value={editCategory}
+                                            onChange={(e) => setEditCategory(e.target.value)}
+                                            onBlur={handleUpdateCategory}
+                                            className="mt-1 p-1 border border-blue-500 rounded text-center text-md font-bold"
+                                            autoFocus
+                                        >
+                                            {settings.categories.map(cat => (
+                                                <option key={cat} value={cat}>{cat}</option>
+                                            ))}
+                                        </select>
+                                    ) : (
+                                        <p 
+                                            className="text-xl font-bold text-gray-800 cursor-pointer hover:bg-yellow-100 p-1 rounded transition"
+                                            onClick={() => {setEditCategory(item.category); setIsEditingCategory(true);}}
+                                        >
+                                            {item.category}
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+
+                            <h3 className="text-xl font-semibold mb-3 border-b pb-2 text-gray-700">交易歷史記錄</h3>
+                            
+                            {/* 交易明細表格 */}
                             <div className="overflow-x-auto border rounded-lg">
                                 <table className="min-w-full divide-y divide-gray-200">
                                     <thead className="bg-gray-50">
                                         <tr>
-                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">狀態</th>
-                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">購入價格</th>
-                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">購入日期</th>
-                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">記錄 ID</th>
+                                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">類型</th>
+                                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">數量</th>
+                                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">單價/成本</th>
+                                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">貨幣</th>
+                                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">備註/店名</th>
+                                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">時間</th>
+                                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
                                         </tr>
                                     </thead>
                                     <tbody className="bg-white divide-y divide-gray-200">
-                                        {itemDetails.length === 0 ? (
-                                            <tr><td colSpan="4" className="px-6 py-4 text-center text-gray-500">無詳細入庫記錄。</td></tr>
+                                        {transactionHistory.length === 0 ? (
+                                            <tr><td colSpan="7" className="px-6 py-4 text-center text-gray-500">無詳細交易記錄。</td></tr>
                                         ) : (
-                                            itemDetails.map((detail) => (
-                                                <tr key={detail.id} className={`${isItemOut(detail) ? 'bg-red-50' : 'hover:bg-gray-50'}`}>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                                        {item.currentStock > 0 ? (
-                                                            <span className="text-green-600">在庫</span>
-                                                        ) : (
-                                                            <span className="text-red-600">已出庫</span>
-                                                        )}
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                                        {formatCurrency(detail.price, detail.currency)}
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                        {new Date(detail.created_at).toLocaleString()}
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-400">
-                                                        {detail.id.substring(0, 8)}...
-                                                    </td>
-                                                </tr>
+                                            transactionHistory.map((record) => (
+                                                <TransactionRow 
+                                                    key={record.id} 
+                                                    record={record} 
+                                                    onUpdated={refreshData} // 每次更新後重新載入數據
+                                                    userId={userId}
+                                                />
                                             ))
                                         )}
                                     </tbody>
                                 </table>
                             </div>
                         </div>
-                        <div className="p-4 bg-gray-50 border-t flex justify-end">
+
+                        {/* 底部操作按鈕 */}
+                        <div className="p-4 bg-gray-50 border-t flex justify-between items-center">
+                            <button
+                                onClick={handleDeleteAll}
+                                disabled={loading}
+                                className="px-4 py-2 bg-red-500 text-white font-semibold rounded-lg hover:bg-red-600 transition duration-300 disabled:opacity-50 text-sm"
+                            >
+                                永久刪除此條碼所有紀錄
+                            </button>
                             <button
                                 onClick={onClose}
                                 className="px-6 py-2 bg-gray-300 text-gray-800 font-semibold rounded-lg hover:bg-gray-400 transition duration-300"
@@ -364,7 +803,7 @@
         };
 
         // ----------------------------------------------------------------------
-        // 6. 應用程式主體：App 組件
+        // 7. 應用程式主體：App 組件
         // ----------------------------------------------------------------------
         const App = () => {
             const [session, setSession] = useState(null);
@@ -375,11 +814,55 @@
             const [inventory, setInventory] = useState([]); 
             const [stockOuts, setStockOuts] = useState([]);
             const [settings, setSettings] = useState(null); 
-            const [selectedItem, setSelectedItem] = useState(null); // ✅ 新增：用於明細彈窗
+            const [selectedItem, setSelectedItem] = useState(null); // ✅ 用於明細彈窗
 
             // Derived State
             const userId = session?.user?.id || null;
             
+            // 處理資料獲取和訂閱的函式
+            const fetchInitialData = useCallback(async () => {
+                if (!userId) return;
+
+                // Fetch Inventory Items (inventory_items table)
+                const { data: invData, error: invError } = await supabaseClient
+                    .from('inventory_items') 
+                    .select('*')
+                    .eq('user_id', userId);
+                if (invError) console.error("Error fetching inventory:", invError);
+                else setInventory(invData);
+
+                // Fetch Stock Outs (stock_outs table)
+                const { data: outData, error: outError } = await supabaseClient
+                    .from('stock_outs') 
+                    .select('*')
+                    .eq('user_id', userId);
+                if (outError) console.error("Error fetching stock outs:", outError);
+                else setStockOuts(outData);
+
+                // Fetch Settings (user_settings table)
+                const { data: settingsData, error: settingsError } = await supabaseClient
+                    .from('user_settings') 
+                    .select('*')
+                    .eq('user_id', userId)
+                    .maybeSingle(); 
+                    
+                if (settingsError && settingsError.code !== 'PGRST116') { 
+                        console.error("Error fetching settings:", settingsError);
+                } else if (settingsData) {
+                    // 將 category 欄位（可能為字串或 JSON 陣列）轉換為陣列
+                    let categoriesArray = settingsData.categories;
+                    if (typeof categoriesArray === 'string') {
+                        categoriesArray = categoriesArray.split(',').map(s => s.trim()).filter(s => s.length > 0);
+                    }
+                    setSettings({ ...settingsData, categories: categoriesArray || [] });
+
+                } else {
+                     // Default settings for new user
+                     setSettings({ categories: ['電子產品', '服裝', '食品', '書籍', '其他'], currency: 'HKD', user_id: userId });
+                }
+            }, [userId]);
+
+
             // 1. Supabase 身份驗證監聽
             useEffect(() => {
                 supabaseClient.auth.getSession().then(({ data: { session } }) => {
@@ -398,48 +881,14 @@
             }, []);
 
 
-            // 2. Supabase 即時數據訂閱
+            // 2. Supabase 即時數據訂閱/初始載入
             useEffect(() => {
                 if (!userId) return;
 
-                const fetchInitialData = async () => {
-                    // Fetch Inventory Items (inventory_items table)
-                    const { data: invData, error: invError } = await supabaseClient
-                        .from('inventory_items') 
-                        .select('*')
-                        .eq('user_id', userId);
-                    if (invError) console.error("Error fetching inventory:", invError);
-                    else setInventory(invData);
-
-                    // Fetch Stock Outs (stock_outs table)
-                    const { data: outData, error: outError } = await supabaseClient
-                        .from('stock_outs') 
-                        .select('*')
-                        .eq('user_id', userId);
-                    if (outError) console.error("Error fetching stock outs:", outError);
-                    else setStockOuts(outData);
-
-                    // Fetch Settings (user_settings table)
-                    const { data: settingsData, error: settingsError } = await supabaseClient
-                        .from('user_settings') 
-                        .select('*')
-                        .eq('user_id', userId)
-                        .maybeSingle(); 
-                        
-                    if (settingsError && settingsError.code !== 'PGRST116') { 
-                         console.error("Error fetching settings:", settingsError);
-                    } else if (settingsData) {
-                        setSettings(settingsData);
-                    } else {
-                         // Default settings for new user
-                         setSettings({ categories: ['電子產品', '服裝', '食品', '書籍', '其他'], currency: 'HKD', user_id: userId });
-                    }
-                };
-
                 fetchInitialData();
 
-
                 // Setup Realtime Subscriptions
+                // 這裡的訂閱僅用於觸發重新獲取資料，以確保編輯操作後的數據刷新
                 const inventorySubscription = supabaseClient
                     .channel('inventory_changes')
                     .on(
@@ -478,8 +927,7 @@
                     supabaseClient.removeChannel(stockOutsSubscription);
                     supabaseClient.removeChannel(settingsSubscription);
                 };
-            }, [userId]);
-
+            }, [userId, fetchInitialData]); // 依賴 fetchInitialData
 
             const handleLogout = async () => {
                 await supabaseClient.auth.signOut();
@@ -498,11 +946,11 @@
             }
 
             // ----------------------------------------------------------------------
-            // 7. 組件 - 庫存概覽 (InventoryOverview) 
+            // 8. 組件 - 庫存概覽 (InventoryOverview) 
             // ----------------------------------------------------------------------
             const InventoryOverview = ({ settings, inventory, stockOuts, setSelectedItem }) => {
                 const [filterText, setFilterText] = useState('');
-                const [filterCategory, setFilterCategory] = useState('All'); // ✅ 新增：分類篩選狀態
+                const [filterCategory, setFilterCategory] = useState('All'); 
                 const [sortKey, setSortKey] = useState('currentStock');
                 const [sortDirection, setSortDirection] = useState('desc');
 
@@ -515,7 +963,7 @@
                         const textMatch = item.name.toLowerCase().includes(filterText.toLowerCase()) ||
                                           item.barcode.includes(filterText);
                         
-                        const categoryMatch = filterCategory === 'All' || item.category === filterCategory; // ✅ 應用分類篩選
+                        const categoryMatch = filterCategory === 'All' || item.category === filterCategory;
 
                         return textMatch && categoryMatch;
                     });
@@ -534,7 +982,7 @@
                         return sortDirection === 'asc' ? comparison : comparison * -1;
                     });
                     return data;
-                }, [overviewData, filterText, sortKey, sortDirection, filterCategory]); // ✅ 依賴 filterCategory
+                }, [overviewData, filterText, sortKey, sortDirection, filterCategory]);
 
                 const handleSort = (key) => {
                     if (sortKey === key) {
@@ -561,7 +1009,7 @@
                                 總庫存價值: <span className="text-blue-600">{formatCurrency(totalValue, settings.currency)}</span>
                             </h3>
                             <div className="flex gap-4">
-                                {/* 分類篩選器 (Select) ✅ 新增功能 */}
+                                {/* 分類篩選器 (Select) */}
                                 <select
                                     value={filterCategory}
                                     onChange={(e) => setFilterCategory(e.target.value)}
@@ -616,7 +1064,7 @@
                                             <tr key={item.barcode} className={`${item.currentStock === 0 ? 'bg-red-50 text-gray-500' : 'hover:bg-gray-50'}`}>
                                                 <td 
                                                     className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer underline" 
-                                                    onClick={() => setSelectedItem(item)} // ✅ 點擊時顯示明細
+                                                    onClick={() => setSelectedItem(item)} 
                                                 >
                                                     {item.name}
                                                 </td>
@@ -642,19 +1090,29 @@
             };
 
             // ----------------------------------------------------------------------
-            // 8. 組件 - 新增加 (AddItemForm) 
+            // 9. 組件 - 新增加 (AddItemForm) 
             // ----------------------------------------------------------------------
             const AddItemForm = ({ supabaseClient, userId, categories, defaultCurrency, onSuccess }) => {
                 const [name, setName] = useState('');
                 const [barcode, setBarcode] = useState('');
                 const [category, setCategory] = useState(categories[0] || '');
                 const [price, setPrice] = useState(0); 
-                const [itemCurrency, setItemCurrency] = useState(defaultCurrency); // ✅ 新增：單件貨幣狀態
+                const [itemCurrency, setItemCurrency] = useState(defaultCurrency); 
                 const [quantity, setQuantity] = useState(1);
                 const [message, setMessage] = useState('');
                 const [loading, setLoading] = useState(false);
                 const [showScanner, setShowScanner] = useState(false);
                 
+                // 獲取最新的 category 列表
+                useEffect(() => {
+                    if (categories.length > 0 && !categories.includes(category)) {
+                        setCategory(categories[0]);
+                    } else if (categories.length > 0 && category === '') {
+                        setCategory(categories[0]);
+                    }
+                }, [categories, category]);
+
+
                 const handleSubmit = async (e) => {
                     e.preventDefault();
                     if (!name || !barcode || quantity <= 0 || price < 0) {
@@ -671,7 +1129,8 @@
                         barcode: barcode.trim(),
                         category,
                         price: parseFloat(price), 
-                        currency: itemCurrency, // ✅ 使用 itemCurrency
+                        currency: itemCurrency, 
+                        store: '', // 新增時備註欄位暫時留空
                     };
 
                     try {
@@ -689,7 +1148,7 @@
                         setName('');
                         setBarcode('');
                         setPrice(0);
-                        setItemCurrency(defaultCurrency); // 重置
+                        setItemCurrency(defaultCurrency); 
                         setQuantity(1);
                         setTimeout(() => {
                             setMessage('');
@@ -708,9 +1167,6 @@
                     <div className="p-6 bg-white shadow-xl rounded-2xl">
                         <h2 className="text-2xl font-bold mb-6 text-gray-800">新增庫存項目</h2>
                         <form onSubmit={handleSubmit} className="space-y-6">
-                            {/* 名稱, 條碼, 類別 (不變) */}
-                            {/* ... (略) ... */}
-
                             {/* 條碼與掃描 */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">條碼 (Bar Code) <span className="text-red-500">*</span></label>
@@ -776,7 +1232,7 @@
                                     />
                                 </div>
 
-                                {/* 貨幣選擇 (Select) ✅ 新增功能 */}
+                                {/* 貨幣選擇 (Select) */}
                                 <div className="w-1/4"> 
                                     <label className="block text-sm font-medium text-gray-700 mb-1">貨幣 <span className="text-red-500">*</span></label>
                                     <select
@@ -845,7 +1301,7 @@
             };
 
             // ----------------------------------------------------------------------
-            // 9. 組件 - 設定面板 (SettingsPanel) 
+            // 10. 組件 - 設定面板 (SettingsPanel) 
             // ----------------------------------------------------------------------
             const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab }) => {
                 const [categoriesInput, setCategoriesInput] = useState(
@@ -898,7 +1354,7 @@
                         <h2 className="text-2xl font-bold text-gray-800 border-b pb-4">應用程式設定</h2>
 
                         <form onSubmit={handleSubmit} className="space-y-6">
-                            {/* 貨幣設定 - 使用下拉選單 ✅ 恢復功能 */}
+                            {/* 貨幣設定 - 使用下拉選單 */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">
                                     預設貨幣代碼 (用於成本/總值)
@@ -916,7 +1372,7 @@
                                 <p className="mt-1 text-xs text-gray-500">請選擇三位字母代碼。</p>
                             </div>
 
-                            {/* 類別設定 - 保持 TEXTAREA，但優化說明 ✅ 恢復功能 */}
+                            {/* 類別設定 - 保持 TEXTAREA，但優化說明 */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">
                                     庫存類別列表 (以逗號分隔，例如：電子產品, 服裝)
@@ -964,7 +1420,237 @@
 
 
             // ----------------------------------------------------------------------
-            // 10. 主應用程式介面 (Main UI)
+            // 11. 組件 - 出庫頁面 (StockOutPage) 
+            // ----------------------------------------------------------------------
+            const StockOutPage = ({ supabaseClient, userId, inventory, stockOuts, setActiveTab }) => {
+                const [barcode, setBarcode] = useState('');
+                const [name, setName] = useState('');
+                const [quantity, setQuantity] = useState(1);
+                const [showScanner, setShowScanner] = useState(false);
+                const [message, setMessage] = useState('');
+                const [loading, setLoading] = useState(false);
+
+                // 建立「名稱 → 條碼」的映射表（只包含目前有庫存的項目）
+                const nameToBarcodeMap = useMemo(() => {
+                    const map = {};
+                    const grouped = aggregateInventoryData(inventory, stockOuts);
+                    grouped.forEach(item => {
+                        if (item.currentStock > 0) {
+                            if (!map[item.name]) {
+                                map[item.name] = item.barcode;
+                            } else if (map[item.name] !== item.barcode) {
+                                map[item.name] = null; // 標記為不唯一
+                            }
+                        }
+                    });
+                    return map;
+                }, [inventory, stockOuts]);
+
+                // 當 barcode 改變 → 自動填名稱
+                useEffect(() => {
+                    if (!barcode) {
+                        setName('');
+                        return;
+                    }
+                    const grouped = aggregateInventoryData(inventory, stockOuts);
+                    const found = grouped.find(g => g.barcode === barcode);
+                    if (found) {
+                        setName(found.name);
+                    } else {
+                        setName('');
+                    }
+                }, [barcode, inventory, stockOuts]);
+
+                // 當名稱改變 → 自動填條碼（僅在名稱唯一對應時）
+                useEffect(() => {
+                    if (!name) {
+                        setBarcode('');
+                        return;
+                    }
+                    const possibleBarcode = nameToBarcodeMap[name];
+                    if (possibleBarcode) {
+                        setBarcode(possibleBarcode);
+                    }
+                }, [name, nameToBarcodeMap]);
+
+                // 計算目前庫存量
+                const currentStock = useMemo(() => {
+                    const grouped = aggregateInventoryData(inventory, stockOuts);
+                    const item = grouped.find(g => g.barcode === barcode);
+                    return item ? item.currentStock : 0;
+                }, [barcode, inventory, stockOuts]);
+
+                const handleSubmit = async (e) => {
+                    e.preventDefault();
+                    if (!barcode) {
+                        setMessage('請輸入或掃描條碼');
+                        return;
+                    }
+                    if (!name) {
+                        setMessage('請輸入項目名稱');
+                        return;
+                    }
+                    const qty = parseInt(quantity, 10);
+                    if (isNaN(qty) || qty <= 0) {
+                        setMessage('請輸入正確的出庫數量');
+                        return;
+                    }
+                    if (qty > currentStock) {
+                        setMessage(`出庫數量不能大於目前庫存 ${currentStock} 件`);
+                        return;
+                    }
+                    setLoading(true);
+                    setMessage('');
+                    
+                    const newStockOut = {
+                        user_id: userId,
+                        barcode: barcode.trim(),
+                        name: name.trim(),
+                        quantity: qty,
+                        // store: '', // Supabase 表格中沒有 store 欄位，如果需要備註請在 stock_outs 增加
+                    };
+
+                    try {
+                        const { error } = await supabaseClient
+                            .from('stock_outs') 
+                            .insert([newStockOut]);
+
+                        if (error) throw error;
+
+                        setMessage(`成功出庫 ${qty} 件「${name}」`);
+                        setBarcode('');
+                        setName('');
+                        setQuantity(1);
+                        setTimeout(() => {
+                            setMessage('');
+                            setActiveTab('inventory');
+                        }, 4000);
+                    } catch (err) {
+                        console.error("Supabase Stock Out Error:", err);
+                        setMessage('出庫失敗，請再試一次');
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+
+                return (
+                    <div className="p-6 bg-white shadow-xl rounded-2xl">
+                        <h2 className="text-2xl font-bold mb-6 text-gray-800">出庫 / 取貨</h2>
+                        <form onSubmit={handleSubmit} className="space-y-6">
+                            {/* 名稱輸入框 */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    名稱 <span className="text-red-500">*</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={name}
+                                    onChange={(e) => setName(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                    placeholder="輸入品名（會自動帶出條碼）"
+                                    required
+                                />
+                                {name && nameToBarcodeMap[name] === null && (
+                                    <p className="text-xs text-orange-600 mt-1">
+                                        ※ 此品名對應多個條碼，請掃描或手動輸入正確條碼
+                                    </p>
+                                )}
+                            </div>
+
+                            {/* 條碼 */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    條碼 (Bar Code) <span className="text-red-500">*</span>
+                                </label>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={barcode}
+                                        onChange={(e) => setBarcode(e.target.value)}
+                                        className="flex-grow p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                        placeholder="輸入或掃描條碼（會自動帶出品名）"
+                                        required
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowScanner(true)}
+                                        className="px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow flex items-center gap-2"
+                                    >
+                                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" /></svg>
+                                        掃描
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 目前庫存顯示 */}
+                            {barcode && (
+                                <div className="bg-blue-50 p-4 rounded-lg">
+                                    <span className="text-sm font-medium text-blue-800">
+                                        目前庫存量：{currentStock} 件
+                                    </span>
+                                </div>
+                            )}
+
+                            {/* 出庫數量 */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    出庫數量 <span className="text-red-500">*</span>
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max={currentStock || 1}
+                                    value={quantity}
+                                    onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                    required
+                                />
+                            </div>
+
+                            <button
+                                type="submit"
+                                disabled={loading || currentStock === 0}
+                                className="w-full py-3 px-4 bg-red-600 text-white font-semibold rounded-lg shadow-md hover:bg-red-700 transition duration-300 disabled:opacity-50"
+                            >
+                                {loading ? '處理中...' : '確認出庫'}
+                            </button>
+                        </form>
+
+                        {message && (
+                            <div className={`mt-4 p-3 rounded-lg text-sm font-medium text-center ${
+                                message.includes('成功') ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                            }`}>
+                                {message}
+                            </div>
+                        )}
+
+                        {/* 條碼掃描器 Modal (不變) */}
+                        {showScanner && (
+                            <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+                                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+                                    <div className="bg-gray-900 p-4 flex justify-between items-center">
+                                        <h3 className="text-white text-lg font-bold">掃描條碼</h3>
+                                        <button onClick={() => setShowScanner(false)} className="text-white text-3xl leading-none">×</button>
+                                    </div>
+                                    <BarcodeScanner
+                                        onDetected={(code) => {
+                                            setBarcode(code);
+                                            setShowScanner(false);
+                                        }}
+                                    />
+                                    <div className="p-4 text-center text-sm text-gray-600">
+                                        將條碼對準畫面中央方框即可自動辨識
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+
+            // ----------------------------------------------------------------------
+            // 12. 主應用程式介面 (Main UI)
             // ----------------------------------------------------------------------
             return (
                 <div className="min-h-screen flex flex-col">
@@ -1032,7 +1718,7 @@
                                 userId={userId} 
                                 categories={settings.categories} 
                                 defaultCurrency={settings.currency}
-                                onSuccess={() => setActiveTab('inventory')}  
+                                onSuccess={() => {fetchInitialData(); setActiveTab('inventory');}}  
                             />
                         )}
 
@@ -1041,7 +1727,7 @@
                                 settings={settings}
                                 inventory={inventory}
                                 stockOuts={stockOuts}
-                                setSelectedItem={setSelectedItem} // ✅ 傳遞 setSelectedItem
+                                setSelectedItem={setSelectedItem} 
                             />
                         )}
                         
@@ -1066,14 +1752,16 @@
                         )}
                         </div>
 
-                        {/* 明細彈窗渲染 ✅ 新增渲染邏輯 */}
-                        {selectedItem && (
+                        {/* 明細彈窗渲染 */}
+                        {selectedItem && settings && (
                             <DetailModal
                                 item={selectedItem}
                                 inventory={inventory}
                                 stockOuts={stockOuts}
                                 onClose={() => setSelectedItem(null)}
                                 settings={settings}
+                                userId={userId}
+                                refreshData={fetchInitialData} // 傳遞刷新函數
                             />
                         )}
                     </main>
@@ -1084,235 +1772,6 @@
                 </div>
             );
         };
-
-        // ----------------------------------------------------------------------
-        // 11. 組件 - 出庫頁面 (StockOutPage) 
-        // ----------------------------------------------------------------------
-        const StockOutPage = ({ supabaseClient, userId, inventory, stockOuts, setActiveTab }) => {
-            const [barcode, setBarcode] = useState('');
-            const [name, setName] = useState('');
-            const [quantity, setQuantity] = useState(1);
-            const [showScanner, setShowScanner] = useState(false);
-            const [message, setMessage] = useState('');
-            const [loading, setLoading] = useState(false);
-
-            // 建立「名稱 → 條碼」的映射表（只包含目前有庫存的項目）
-            const nameToBarcodeMap = useMemo(() => {
-                const map = {};
-                const grouped = aggregateInventoryData(inventory, stockOuts);
-                grouped.forEach(item => {
-                    if (item.currentStock > 0) {
-                        if (!map[item.name]) {
-                            map[item.name] = item.barcode;
-                        } else if (map[item.name] !== item.barcode) {
-                            map[item.name] = null; 
-                        }
-                    }
-                });
-                return map;
-            }, [inventory, stockOuts]);
-
-            // 當 barcode 改變 → 自動填名稱
-            useEffect(() => {
-                if (!barcode) {
-                    setName('');
-                    return;
-                }
-                const grouped = aggregateInventoryData(inventory, stockOuts);
-                const found = grouped.find(g => g.barcode === barcode);
-                if (found) {
-                    setName(found.name);
-                } else {
-                    setName('');
-                }
-            }, [barcode, inventory, stockOuts]);
-
-            // 當名稱改變 → 自動填條碼（僅在名稱唯一對應時）
-            useEffect(() => {
-                if (!name) {
-                    setBarcode('');
-                    return;
-                }
-                const possibleBarcode = nameToBarcodeMap[name];
-                if (possibleBarcode) {
-                    setBarcode(possibleBarcode);
-                }
-            }, [name, nameToBarcodeMap]);
-
-            // 計算目前庫存量
-            const currentStock = useMemo(() => {
-                const grouped = aggregateInventoryData(inventory, stockOuts);
-                const item = grouped.find(g => g.barcode === barcode);
-                return item ? item.currentStock : 0;
-            }, [barcode, inventory, stockOuts]);
-
-            const handleSubmit = async (e) => {
-                e.preventDefault();
-                if (!barcode) {
-                    setMessage('請輸入或掃描條碼');
-                    return;
-                }
-                if (!name) {
-                    setMessage('請輸入項目名稱');
-                    return;
-                }
-                const qty = parseInt(quantity, 10);
-                if (isNaN(qty) || qty <= 0) {
-                    setMessage('請輸入正確的出庫數量');
-                    return;
-                }
-                if (qty > currentStock) {
-                    setMessage(`出庫數量不能大於目前庫存 ${currentStock} 件`);
-                    return;
-                }
-                setLoading(true);
-                setMessage('');
-                
-                const newStockOut = {
-                    user_id: userId,
-                    barcode: barcode.trim(),
-                    name: name.trim(),
-                    quantity: qty,
-                };
-
-                try {
-                    const { error } = await supabaseClient
-                        .from('stock_outs') 
-                        .insert([newStockOut]);
-
-                    if (error) throw error;
-
-                    setMessage(`成功出庫 ${qty} 件「${name}」`);
-                    setBarcode('');
-                    setName('');
-                    setQuantity(1);
-                    setTimeout(() => {
-                        setMessage('');
-                        setActiveTab('inventory');
-                    }, 4000);
-                } catch (err) {
-                    console.error("Supabase Stock Out Error:", err);
-                    setMessage('出庫失敗，請再試一次');
-                } finally {
-                    setLoading(false);
-                }
-            };
-
-            return (
-                <div className="p-6 bg-white shadow-xl rounded-2xl">
-                    <h2 className="text-2xl font-bold mb-6 text-gray-800">出庫 / 取貨</h2>
-                    <form onSubmit={handleSubmit} className="space-y-6">
-                        {/* 名稱輸入框 */}
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                名稱 <span className="text-red-500">*</span>
-                            </label>
-                            <input
-                                type="text"
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                                className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
-                                placeholder="輸入品名（會自動帶出條碼）"
-                                required
-                            />
-                            {name && nameToBarcodeMap[name] === null && (
-                                <p className="text-xs text-orange-600 mt-1">
-                                    ※ 此品名對應多個條碼，請掃描或手動輸入正確條碼
-                                </p>
-                            )}
-                        </div>
-
-                        {/* 條碼 */}
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                條碼 (Bar Code) <span className="text-red-500">*</span>
-                            </label>
-                            <div className="flex gap-2">
-                                <input
-                                    type="text"
-                                    value={barcode}
-                                    onChange={(e) => setBarcode(e.target.value)}
-                                    className="flex-grow p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
-                                    placeholder="輸入或掃描條碼（會自動帶出品名）"
-                                    required
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => setShowScanner(true)}
-                                    className="px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow flex items-center gap-2"
-                                >
-                                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" /></svg>
-                                    掃描
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* 目前庫存顯示 */}
-                        {barcode && (
-                            <div className="bg-blue-50 p-4 rounded-lg">
-                                <span className="text-sm font-medium text-blue-800">
-                                    目前庫存量：{currentStock} 件
-                                </span>
-                            </div>
-                        )}
-
-                        {/* 出庫數量 */}
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                出庫數量 <span className="text-red-500">*</span>
-                            </label>
-                            <input
-                                type="number"
-                                min="1"
-                                max={currentStock || 1}
-                                value={quantity}
-                                onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value) || 1))}
-                                className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
-                                required
-                            />
-                        </div>
-
-                        <button
-                            type="submit"
-                            disabled={loading || currentStock === 0}
-                            className="w-full py-3 px-4 bg-red-600 text-white font-semibold rounded-lg shadow-md hover:bg-red-700 transition duration-300 disabled:opacity-50"
-                        >
-                            {loading ? '處理中...' : '確認出庫'}
-                        </button>
-                    </form>
-
-                    {message && (
-                        <div className={`mt-4 p-3 rounded-lg text-sm font-medium text-center ${
-                            message.includes('成功') ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                        }`}>
-                            {message}
-                        </div>
-                    )}
-
-                    {/* 條碼掃描器 Modal (不變) */}
-                    {showScanner && (
-                        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
-                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
-                                <div className="bg-gray-900 p-4 flex justify-between items-center">
-                                    <h3 className="text-white text-lg font-bold">掃描條碼</h3>
-                                    <button onClick={() => setShowScanner(false)} className="text-white text-3xl leading-none">×</button>
-                                </div>
-                                <BarcodeScanner
-                                    onDetected={(code) => {
-                                        setBarcode(code);
-                                        setShowScanner(false);
-                                    }}
-                                />
-                                <div className="p-4 text-center text-sm text-gray-600">
-                                    將條碼對準畫面中央方框即可自動辨識
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            );
-        };
-
 
         // 渲染應用程式到 DOM
         if (typeof ReactDOM !== 'undefined') {
