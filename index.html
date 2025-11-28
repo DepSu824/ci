@@ -139,10 +139,14 @@
         };
 
 
-        // 聚合庫存數據 (修正版本：加入匯率計算)
+        // 聚合庫存數據 (修正版本：加入匯率計算，並能處理無匯率情況)
         const aggregateInventoryData = (inventory = [], stockOuts = [], targetCurrency, rates) => {
             const grouped = {};
             const stockOutMap = {};
+            
+            // **修正點 2.1：判斷是否需要進行貨幣轉換**
+            // 只有當 targetCurrency 和 rates 都有值且 rates 不為空時才進行計算
+            const needsConversion = targetCurrency && rates && Object.keys(rates).length > 0;
 
             // 1. 處理出庫數據
             stockOuts.forEach(out => {
@@ -179,7 +183,13 @@
                 // 擴充紀錄：加入轉換後的價格
                 const recordsWithConvertedPrice = uniquePurchaseRecords.map(rec => {
                     const originalPrice = rec.price || 0;
-                    const priceConverted = convertCurrency(originalPrice, rec.currency, targetCurrency, rates);
+                    let priceConverted = originalPrice; // 預設為原價
+                    
+                    // **修正點 2.2：只有需要轉換時才呼叫 convertCurrency**
+                    if (needsConversion) {
+                        priceConverted = convertCurrency(originalPrice, rec.currency, targetCurrency, rates);
+                    }
+                    
                     return {
                         ...rec,
                         priceConverted: priceConverted,
@@ -200,7 +210,8 @@
                 item.avgCostConverted = item.totalInStock > 0 ? item.totalCostConverted / item.totalInStock : 0;
                 
                 // 計算平均購入價 (排除贈品)
-                if (validPurchaseRecords.length > 0) {
+                // **修正點 2.3：只有需要轉換時，才計算價格相關的統計數據**
+                if (validPurchaseRecords.length > 0 && needsConversion) { 
                     const validTotalCost = validPurchaseRecords.reduce((sum, rec) => sum + rec.priceConverted, 0);
                     item.avgPurchasePrice = validTotalCost / validPurchaseRecords.length;
                     
@@ -210,6 +221,7 @@
                     // 計算最低價 (從有效購入記錄的轉換後價格中取最小值)
                     item.minPrice = Math.min(...validPurchaseRecords.map(rec => rec.priceConverted));
                 } else {
+                    // 如果不需要轉換，或沒有有效購買記錄，則價格相關統計為 0
                     item.avgPurchasePrice = 0;
                     item.maxPrice = 0;
                     item.minPrice = 0; 
@@ -1705,7 +1717,7 @@
                         if (error) throw error;
 
                         setMessage('設定已成功儲存！');
-                        // 📌 修正點：在成功儲存後，立即通知父組件（App）刷新數據
+                        // 📌 修正點 1：在成功儲存後，立即通知父組件（App）刷新數據
                         onSettingsSaved(); 
                         setTimeout(() => setMessage(''), 3000);
                     } catch (error) { // 更改錯誤變數名稱
@@ -1816,7 +1828,6 @@
             // ----------------------------------------------------------------------
             // 12. 組件 - 出庫頁面 (StockOutPage) 
             // ----------------------------------------------------------------------
-            // (略 - 保持不變)
             const StockOutPage = ({ supabaseClient, userId, inventory, stockOuts, setActiveTab }) => {
                 const [barcode, setBarcode] = useState('');
                 const [name, setName] = useState('');
@@ -1828,8 +1839,8 @@
                 // 建立「名稱 → 條碼」的映射表（只包含目前有庫存的項目）
                 const nameToBarcodeMap = useMemo(() => {
                     const map = {};
-                    // 這裡不需要匯率，所以直接傳入 null, {}
-                    const grouped = aggregateInventoryData(inventory, stockOuts, null, {}); 
+                    // **修正點 2.4：明確傳遞 null 給 targetCurrency 和 rates，避免匯率轉換警告**
+                    const grouped = aggregateInventoryData(inventory, stockOuts, null, null); 
                     grouped.forEach(item => {
                         if (item.currentStock > 0) {
                             if (!map[item.name]) {
@@ -1848,7 +1859,8 @@
                         setName('');
                         return;
                     }
-                    const grouped = aggregateInventoryData(inventory, stockOuts, null, {});
+                    // **修正點 2.4：明確傳遞 null 給 targetCurrency 和 rates，避免匯率轉換警告**
+                    const grouped = aggregateInventoryData(inventory, stockOuts, null, null);
                     const found = grouped.find(g => g.barcode === barcode);
                     if (found) {
                         setName(found.name);
@@ -1871,7 +1883,8 @@
 
                 // 計算目前庫存量
                 const currentStock = useMemo(() => {
-                    const grouped = aggregateInventoryData(inventory, stockOuts, null, {});
+                    // **修正點 2.4：明確傳遞 null 給 targetCurrency 和 rates，避免匯率轉換警告**
+                    const grouped = aggregateInventoryData(inventory, stockOuts, null, null);
                     const item = grouped.find(g => g.barcode === barcode);
                     return item ? item.currentStock : 0;
                 }, [barcode, inventory, stockOuts]);
@@ -2145,7 +2158,7 @@
                                 handleLogout={handleLogout} 
                                 setActiveTab={setActiveTab}
                                 supportedCurrencies={supportedCurrencies} // 📌 傳遞貨幣列表
-                                onSettingsSaved={fetchInitialData} // 📌 修正點：傳遞刷新函式
+                                onSettingsSaved={fetchInitialData} // 📌 修正點 1：傳遞刷新函式
                             />
                         )}
                         </div>
