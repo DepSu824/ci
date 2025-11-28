@@ -1670,63 +1670,76 @@
             // ----------------------------------------------------------------------
             // 📌 修正：新增 onSettingsSaved prop
             const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab, supportedCurrencies, onSettingsSaved }) => {
+    
+    const [categories, setCategories] = useState(currentSettings.categories || []);
+    const [newCategoryName, setNewCategoryName] = useState('');
+
+    const [currency, setCurrency] = useState(currentSettings.currency);
+    const [message, setMessage] = useState('');
+    const [loading, setLoading] = useState(false);
+    
+    // 處理新增類別
+    const handleAddCategory = () => {
+        const trimmedName = newCategoryName.trim();
+        if (trimmedName && !categories.includes(trimmedName)) {
+            setCategories([...categories, trimmedName]);
+            setNewCategoryName('');
+        }
+    };
+
+    // 處理刪除類別
+    const handleDeleteCategory = (name) => {
+        setCategories(categories.filter(cat => cat !== name));
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setMessage('');
+
+        if (categories.length === 0) {
+            setMessage('類別列表不能為空。');
+            setLoading(false);
+            return;
+        }
+
+        const newSettings = {
+            user_id: userId,
+            categories: categories, 
+            currency: currency,
+        };
+
+        try {
+            const { error } = await supabaseClient
+                .from('user_settings') 
+                .upsert(newSettings, { onConflict: 'user_id' }); 
+
+            if (error) throw error;
+
+            setMessage('設定已成功儲存！');
+
+            // 1. 設置定時器，確保訊息顯示 3 秒
+            setTimeout(() => {
+                // 2. 移除訊息
+                setMessage('');
                 
-                const [categories, setCategories] = useState(currentSettings.categories || []);
-                const [newCategoryName, setNewCategoryName] = useState('');
-
-                const [currency, setCurrency] = useState(currentSettings.currency);
-                const [message, setMessage] = useState('');
-                const [loading, setLoading] = useState(false);
+                // 3. 刷新數據（調用 App 組件的 fetchInitialData）
+                onSettingsSaved(); 
                 
-                // 處理新增類別
-                const handleAddCategory = () => {
-                    const trimmedName = newCategoryName.trim();
-                    if (trimmedName && !categories.includes(trimmedName)) {
-                        setCategories([...categories, trimmedName]);
-                        setNewCategoryName('');
-                    }
-                };
-
-                // 處理刪除類別
-                const handleDeleteCategory = (name) => {
-                    setCategories(categories.filter(cat => cat !== name));
-                };
-
-                const handleSubmit = async (e) => {
-                    e.preventDefault();
-                    setLoading(true);
-                    setMessage('');
-
-                    if (categories.length === 0) {
-                        setMessage('類別列表不能為空。');
-                        setLoading(false);
-                        return;
-                    }
-
-                    const newSettings = {
-                        user_id: userId,
-                        categories: categories, 
-                        currency: currency,
-                    };
-
-                    try {
-                        const { error } = await supabaseClient
-                            .from('user_settings') 
-                            .upsert(newSettings, { onConflict: 'user_id' }); 
-
-                        if (error) throw error;
-
-                        setMessage('設定已成功儲存！');
-                        // 📌 修正點 1：在成功儲存後，立即通知父組件（App）刷新數據
-                        onSettingsSaved(); 
-                        setTimeout(() => setMessage(''), 3000);
-                    } catch (error) { // 更改錯誤變數名稱
-                        console.error("Supabase Settings Error:", error);
-                        setMessage('儲存設定失敗。');
-                    } finally {
-                        setLoading(false);
-                    }
-                };
+                // 4. 跳轉到概要頁
+                setActiveTab('inventory');
+            }, 3000); // 3000 毫秒 (3 秒)
+            
+        } catch (error) { // 更改錯誤變數名稱
+            console.error("Supabase Settings Error:", error);
+            setMessage('儲存設定失敗。');
+            // 如果失敗，則短暫顯示錯誤訊息
+            setTimeout(() => setMessage(''), 3000); 
+        } finally {
+            // 不論成功或失敗，結束載入狀態
+            setLoading(false);
+        }
+    };
 
                 return (
                     <div className="p-6 bg-white shadow-xl rounded-2xl space-y-8">
