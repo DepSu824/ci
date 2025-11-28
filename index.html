@@ -106,7 +106,16 @@
         const formatTimestamp = (timestamp) => {
             if (!timestamp) return '-';
             try {
-                return new Date(timestamp).toLocaleString();
+                // 將 ISO 8601 格式的字串轉換成 Date 物件
+                return new Date(timestamp).toLocaleString('zh-TW', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false,
+                });
             } catch (e) {
                 return timestamp; // 返回原始值以防解析錯誤
             }
@@ -141,14 +150,13 @@
                     };
                 }
                 grouped[key].totalInStock += 1; 
-                grouped[key].totalCost += itemCost;
                 grouped[key].category = item.category; // 使用最新的 category
                 grouped[key].name = item.name; // 使用最新的 name
             });
 
             // 3. 計算平均成本和剩餘庫存
             Object.values(grouped).forEach(item => {
-                // 修正：計算平均成本不應該只基於 totalInStock（數量永遠為 1），而是基於實際購入的記錄數量
+                // 計算平均成本：基於所有 purchase records 的總成本 / 總數量
                 const uniquePurchaseRecords = inventory.filter(inv => inv.barcode === item.barcode);
                 item.totalInStock = uniquePurchaseRecords.length;
                 item.totalCost = uniquePurchaseRecords.reduce((sum, rec) => sum + (rec.price || 0), 0);
@@ -473,7 +481,207 @@
         };
 
         // ----------------------------------------------------------------------
-        // 6. 詳細明細彈窗 (DetailModal) - 包含所有編輯功能
+        // 6.1. 快速取貨/出庫面板 (QuickStockOutPanel)
+        // ----------------------------------------------------------------------
+        const QuickStockOutPanel = ({ item, currentStock, userId, refreshData }) => {
+            const [takeOutQuantity, setTakeOutQuantity] = useState(1);
+            const [loading, setLoading] = useState(false);
+            const [message, setMessage] = useState('');
+
+            const handleTakeOut = async () => {
+                const qty = parseInt(takeOutQuantity, 10);
+                if (isNaN(qty) || qty <= 0) {
+                    setMessage('請輸入正確的數量');
+                    return;
+                }
+                if (qty > currentStock) {
+                    setMessage(`出庫數量不能大於目前庫存 ${currentStock} 件`);
+                    return;
+                }
+
+                setLoading(true);
+                setMessage('');
+                try {
+                    const newStockOut = {
+                        user_id: userId,
+                        barcode: item.barcode,
+                        name: item.name,
+                        quantity: qty,
+                        // store: '', // 保持一致，暫時不記錄備註
+                    };
+
+                    const { error } = await supabaseClient
+                        .from('stock_outs') 
+                        .insert([newStockOut]);
+
+                    if (error) throw error;
+
+                    setMessage(`成功出庫 ${qty} 件！`);
+                    setTakeOutQuantity(1);
+                    refreshData?.();
+                    
+                } catch (err) {
+                    console.error("Supabase Stock Out Error:", err);
+                    setMessage('出庫失敗');
+                } finally {
+                    setLoading(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
+            };
+            
+            return (
+                <div className="p-4 bg-red-50 border border-red-200 rounded-lg shadow-sm">
+                    <h4 className="text-lg font-semibold text-red-700 mb-3">📦 快速取貨 / 出庫</h4>
+                    <div className="flex items-center gap-4">
+                        <input
+                            type="number"
+                            min="1"
+                            max={currentStock}
+                            value={takeOutQuantity}
+                            onChange={(e) => setTakeOutQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                            className="w-24 p-2 border border-red-300 rounded-lg text-center"
+                            disabled={currentStock <= 0}
+                        />
+                        <button
+                            onClick={handleTakeOut}
+                            disabled={loading || currentStock <= 0 || takeOutQuantity > currentStock}
+                            className="flex-grow py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition duration-300 disabled:opacity-50"
+                        >
+                            {loading ? '處理中...' : `取貨出庫 (${currentStock} 剩餘)`}
+                        </button>
+                    </div>
+                    {message && <p className={`mt-2 text-sm ${message.includes('成功') ? 'text-green-700' : 'text-red-700'}`}>{message}</p>}
+                </div>
+            );
+        };
+
+        // ----------------------------------------------------------------------
+        // 6.2. 快速補貨/入庫面板 (QuickStockInPanel)
+        // ----------------------------------------------------------------------
+        const QuickStockInPanel = ({ item, settings, userId, refreshData }) => {
+            const [addQuantity, setAddQuantity] = useState(1);
+            const [addPrice, setAddPrice] = useState(''); // 單件價格
+            const [addCurrency, setAddCurrency] = useState(settings.currency);
+            const [addStore, setAddStore] = useState(''); // 備註
+            const [loading, setLoading] = useState(false);
+            const [message, setMessage] = useState('');
+
+            const isValidPrice = addPrice !== '' && !isNaN(addPrice) && parseFloat(addPrice) >= 0;
+
+            const handleAddStock = async () => {
+                const qty = parseInt(addQuantity, 10);
+                if (isNaN(qty) || qty <= 0 || !isValidPrice || !addCurrency) {
+                    setMessage('請檢查數量、單價和貨幣是否填寫正確');
+                    return;
+                }
+
+                setLoading(true);
+                setMessage('');
+                
+                const itemTemplate = {
+                    user_id: userId,
+                    name: item.name,
+                    barcode: item.barcode,
+                    category: item.category, 
+                    price: parseFloat(addPrice), 
+                    currency: addCurrency, 
+                    store: addStore.trim() || null, 
+                };
+
+                try {
+                    const itemsToInsert = Array.from({ length: qty }, () => ({
+                        ...itemTemplate
+                    }));
+
+                    const { error } = await supabaseClient
+                        .from('inventory_items') 
+                        .insert(itemsToInsert);
+
+                    if (error) throw error;
+
+                    setMessage(`成功補貨 ${qty} 件！`);
+                    setAddQuantity(1);
+                    setAddPrice('');
+                    setAddStore('');
+                    refreshData?.();
+                } catch (err) {
+                    console.error("Supabase Insert Error:", err);
+                    setMessage('補貨失敗');
+                } finally {
+                    setLoading(false);
+                    setTimeout(() => setMessage(''), 3000);
+                }
+            };
+
+            return (
+                <div className="p-4 bg-green-50 border border-green-200 rounded-lg shadow-sm">
+                    <h4 className="text-lg font-semibold text-green-700 mb-3">🛒 快速補貨 / 入庫</h4>
+                    
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-3">
+                        {/* 數量 */}
+                        <div>
+                            <label className="block text-xs font-medium text-gray-700">數量*</label>
+                            <input
+                                type="number"
+                                min="1"
+                                value={addQuantity}
+                                onChange={(e) => setAddQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                                className="w-full p-1 border border-green-300 rounded-lg text-center"
+                            />
+                        </div>
+                        {/* 價格 */}
+                        <div>
+                            <label className="block text-xs font-medium text-gray-700">單價*</label>
+                            <input
+                                type="number"
+                                step="0.01"
+                                value={addPrice}
+                                onChange={(e) => setAddPrice(e.target.value)}
+                                className={`w-full p-1 border rounded-lg text-center ${isValidPrice ? 'border-green-300' : 'border-red-400'}`}
+                                placeholder="0.00"
+                            />
+                        </div>
+                        {/* 貨幣 */}
+                        <div>
+                            <label className="block text-xs font-medium text-gray-700">貨幣*</label>
+                            <select
+                                value={addCurrency}
+                                onChange={(e) => setAddCurrency(e.target.value)}
+                                className="w-full p-1 border border-green-300 rounded-lg text-sm"
+                            >
+                                {COMMON_CURRENCIES.map(code => (
+                                    <option key={code} value={code}>{code}</option>
+                                ))}
+                            </select>
+                        </div>
+                         {/* 備註/店名 */}
+                        <div className="col-span-1">
+                            <label className="block text-xs font-medium text-gray-700">備註/店名</label>
+                            <input
+                                type="text"
+                                value={addStore}
+                                onChange={(e) => setAddStore(e.target.value)}
+                                className="w-full p-1 border border-green-300 rounded-lg"
+                                placeholder="可選"
+                            />
+                        </div>
+                    </div>
+
+                    <button
+                        onClick={handleAddStock}
+                        disabled={loading || !isValidPrice || addQuantity <= 0}
+                        className="w-full py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition duration-300 disabled:opacity-50 text-sm"
+                    >
+                        {loading ? '處理中...' : '確認補貨入庫'}
+                    </button>
+                    {message && <p className={`mt-2 text-sm ${message.includes('成功') ? 'text-green-700' : 'text-red-700'}`}>{message}</p>}
+                </div>
+            );
+        };
+        
+
+        // ----------------------------------------------------------------------
+        // 7. 詳細明細彈窗 (DetailModal) - 包含所有編輯和快速操作功能
         // ----------------------------------------------------------------------
         const DetailModal = ({ item, inventory, stockOuts, onClose, settings, userId, refreshData }) => {
             const [loading, setLoading] = useState(false);
@@ -488,7 +696,7 @@
             const [editCategory, setEditCategory] = useState(item.category);
             const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
             
-            // 處理交易記錄
+            // 交易歷史記錄 (保持不變)
             const transactionHistory = useMemo(() => {
                 const purchases = inventory
                     .filter(rec => rec.barcode === item.barcode)
@@ -517,7 +725,6 @@
                 setLoading(true);
                 setMessage('');
                 try {
-                    // Supabase 批次更新: 使用 UPDATE FROM 來更新所有匹配的記錄 (由於 Supabase 不支援真正的批次操作，我們用一個 UPDATE 搭配 EQ 即可)
                     const { error: invError } = await supabaseClient
                         .from('inventory_items')
                         .update({ name: editName.trim() })
@@ -526,7 +733,6 @@
                     
                     if (invError) throw invError;
                     
-                    // 同步更新 stock_outs 的名稱 (可選, 保持數據一致性)
                     await supabaseClient
                         .from('stock_outs')
                         .update({ name: editName.trim() })
@@ -535,7 +741,7 @@
 
                     setMessage('項目名稱已更新！');
                     setIsEditingName(false);
-                    refreshData?.(); // 通知父層重新整理
+                    refreshData?.(); 
                 } catch (err) {
                     console.error(err);
                     setMessage('更新名稱失敗');
@@ -555,7 +761,6 @@
                 setLoading(true);
                 setMessage('');
                 try {
-                    // 1. 更新所有 inventory_items
                     const { error: invError } = await supabaseClient
                         .from('inventory_items')
                         .update({ barcode: newBarcode })
@@ -563,7 +768,6 @@
                         .eq('user_id', userId);
                     if (invError) throw invError;
 
-                    // 2. 更新所有 stock_outs
                     const { error: outError } = await supabaseClient
                         .from('stock_outs')
                         .update({ barcode: newBarcode })
@@ -574,7 +778,6 @@
                     setMessage(`條碼已變更為 ${newBarcode}！`);
                     setIsEditingBarcode(false);
                     refreshData?.();
-                    // 由於條碼變更，需要關閉 modal 並刷新整個 overview 頁面，才能看到新的聚合數據
                     onClose(); 
                 } catch (err) {
                     console.error(err);
@@ -594,7 +797,6 @@
                 setLoading(true);
                 setMessage('');
                 try {
-                    // 由於 category 只存在於 inventory_items 中，只需更新該表
                     const { error } = await supabaseClient
                         .from('inventory_items')
                         .update({ category: editCategory })
@@ -624,7 +826,6 @@
                 setMessage('');
 
                 try {
-                    // 1. 刪除所有 inventory_items
                     const { error: invError } = await supabaseClient
                         .from('inventory_items')
                         .delete()
@@ -632,7 +833,6 @@
                         .eq('user_id', userId);
                     if (invError) throw invError;
 
-                    // 2. 刪除所有 stock_outs
                     const { error: outError } = await supabaseClient
                         .from('stock_outs')
                         .delete()
@@ -641,8 +841,8 @@
                     if (outError) throw outError;
 
                     setMessage('已永久刪除此條碼的所有紀錄！');
-                    onClose(); // 關閉 modal
-                    refreshData?.(); // 刷新主列表
+                    onClose(); 
+                    refreshData?.(); 
                 } catch (err) {
                     console.error("刪除失敗:", err);
                     setMessage('刪除失敗：' + err.message);
@@ -746,6 +946,22 @@
                                     )}
                                 </div>
                             </div>
+                            
+                            {/* ✅ 新增：快速取貨與補貨面板 */}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+                                <QuickStockOutPanel 
+                                    item={item} 
+                                    currentStock={item.currentStock} 
+                                    userId={userId} 
+                                    refreshData={refreshData}
+                                />
+                                <QuickStockInPanel
+                                    item={item}
+                                    settings={settings}
+                                    userId={userId}
+                                    refreshData={refreshData}
+                                />
+                            </div>
 
                             <h3 className="text-xl font-semibold mb-3 border-b pb-2 text-gray-700">交易歷史記錄</h3>
                             
@@ -803,7 +1019,7 @@
         };
 
         // ----------------------------------------------------------------------
-        // 7. 應用程式主體：App 組件
+        // 8. 應用程式主體：App 組件 (其餘部分保持不變)
         // ----------------------------------------------------------------------
         const App = () => {
             const [session, setSession] = useState(null);
@@ -814,7 +1030,7 @@
             const [inventory, setInventory] = useState([]); 
             const [stockOuts, setStockOuts] = useState([]);
             const [settings, setSettings] = useState(null); 
-            const [selectedItem, setSelectedItem] = useState(null); // ✅ 用於明細彈窗
+            const [selectedItem, setSelectedItem] = useState(null); // 用於明細彈窗
 
             // Derived State
             const userId = session?.user?.id || null;
@@ -827,7 +1043,8 @@
                 const { data: invData, error: invError } = await supabaseClient
                     .from('inventory_items') 
                     .select('*')
-                    .eq('user_id', userId);
+                    .eq('user_id', userId)
+                    .order('created_at', { ascending: false }); // 確保最新的記錄在前面
                 if (invError) console.error("Error fetching inventory:", invError);
                 else setInventory(invData);
 
@@ -835,7 +1052,8 @@
                 const { data: outData, error: outError } = await supabaseClient
                     .from('stock_outs') 
                     .select('*')
-                    .eq('user_id', userId);
+                    .eq('user_id', userId)
+                    .order('created_at', { ascending: false });
                 if (outError) console.error("Error fetching stock outs:", outError);
                 else setStockOuts(outData);
 
@@ -849,7 +1067,6 @@
                 if (settingsError && settingsError.code !== 'PGRST116') { 
                         console.error("Error fetching settings:", settingsError);
                 } else if (settingsData) {
-                    // 將 category 欄位（可能為字串或 JSON 陣列）轉換為陣列
                     let categoriesArray = settingsData.categories;
                     if (typeof categoriesArray === 'string') {
                         categoriesArray = categoriesArray.split(',').map(s => s.trim()).filter(s => s.length > 0);
@@ -857,7 +1074,6 @@
                     setSettings({ ...settingsData, categories: categoriesArray || [] });
 
                 } else {
-                     // Default settings for new user
                      setSettings({ categories: ['電子產品', '服裝', '食品', '書籍', '其他'], currency: 'HKD', user_id: userId });
                 }
             }, [userId]);
@@ -945,10 +1161,19 @@
                 return <AuthForm supabaseClient={supabaseClient} />;
             }
 
+            // 聚合數據
+            const overviewData = useMemo(() => aggregateInventoryData(inventory, stockOuts), [inventory, stockOuts]);
+
+            // 尋找選中的項目（如果數據刷新了，需要重新匹配）
+            const currentSelectedItem = useMemo(() => {
+                if (!selectedItem) return null;
+                return overviewData.find(item => item.barcode === selectedItem.barcode) || selectedItem;
+            }, [selectedItem, overviewData]);
+
             // ----------------------------------------------------------------------
-            // 8. 組件 - 庫存概覽 (InventoryOverview) 
+            // 9. 組件 - 庫存概覽 (InventoryOverview) (保持不變)
             // ----------------------------------------------------------------------
-            const InventoryOverview = ({ settings, inventory, stockOuts, setSelectedItem }) => {
+            const InventoryOverview = ({ settings, overviewData, setSelectedItem }) => {
                 const [filterText, setFilterText] = useState('');
                 const [filterCategory, setFilterCategory] = useState('All'); 
                 const [sortKey, setSortKey] = useState('currentStock');
@@ -956,8 +1181,6 @@
 
                 const categories = Array.isArray(settings.categories) ? settings.categories : (settings.categories || '').split(',').map(s => s.trim());
                 
-                const overviewData = useMemo(() => aggregateInventoryData(inventory, stockOuts), [inventory, stockOuts]);
-
                 const filteredAndSortedData = useMemo(() => {
                     let data = overviewData.filter(item => {
                         const textMatch = item.name.toLowerCase().includes(filterText.toLowerCase()) ||
@@ -1090,7 +1313,7 @@
             };
 
             // ----------------------------------------------------------------------
-            // 9. 組件 - 新增加 (AddItemForm) 
+            // 10. 組件 - 新增加 (AddItemForm) (保持不變)
             // ----------------------------------------------------------------------
             const AddItemForm = ({ supabaseClient, userId, categories, defaultCurrency, onSuccess }) => {
                 const [name, setName] = useState('');
@@ -1301,7 +1524,7 @@
             };
 
             // ----------------------------------------------------------------------
-            // 10. 組件 - 設定面板 (SettingsPanel) 
+            // 11. 組件 - 設定面板 (SettingsPanel) (保持不變)
             // ----------------------------------------------------------------------
             const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab }) => {
                 const [categoriesInput, setCategoriesInput] = useState(
@@ -1420,7 +1643,7 @@
 
 
             // ----------------------------------------------------------------------
-            // 11. 組件 - 出庫頁面 (StockOutPage) 
+            // 12. 組件 - 出庫頁面 (StockOutPage) (保持不變)
             // ----------------------------------------------------------------------
             const StockOutPage = ({ supabaseClient, userId, inventory, stockOuts, setActiveTab }) => {
                 const [barcode, setBarcode] = useState('');
@@ -1650,7 +1873,7 @@
 
 
             // ----------------------------------------------------------------------
-            // 12. 主應用程式介面 (Main UI)
+            // 13. 主應用程式介面 (Main UI)
             // ----------------------------------------------------------------------
             return (
                 <div className="min-h-screen flex flex-col">
@@ -1725,8 +1948,7 @@
                         {activeTab === 'inventory' && settings && (
                             <InventoryOverview
                                 settings={settings}
-                                inventory={inventory}
-                                stockOuts={stockOuts}
+                                overviewData={overviewData}
                                 setSelectedItem={setSelectedItem} 
                             />
                         )}
@@ -1753,15 +1975,15 @@
                         </div>
 
                         {/* 明細彈窗渲染 */}
-                        {selectedItem && settings && (
+                        {currentSelectedItem && settings && (
                             <DetailModal
-                                item={selectedItem}
+                                item={currentSelectedItem} // 使用匹配最新的聚合數據
                                 inventory={inventory}
                                 stockOuts={stockOuts}
                                 onClose={() => setSelectedItem(null)}
                                 settings={settings}
                                 userId={userId}
-                                refreshData={fetchInitialData} // 傳遞刷新函數
+                                refreshData={fetchInitialData} 
                             />
                         )}
                     </main>
