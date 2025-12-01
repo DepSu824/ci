@@ -1770,7 +1770,10 @@
                 const [message, setMessage] = useState('');
                 const [loading, setLoading] = useState(false);
                 
-                // --- 匯出邏輯 ---
+                // 📌 新增狀態：是否清除現有數據
+                const [clearExistingData, setClearExistingData] = useState(false);
+                
+                // --- 匯出邏輯 (無變動) ---
                 const handleExportData = async () => {
                     setLoading(true);
                     setMessage('正在準備匯出數據...');
@@ -1814,7 +1817,7 @@
                     }
                 };
 
-                // --- 匯入邏輯 ---
+                // --- 匯入邏輯 (新增清除舊數據邏輯) ---
                 const handleFileChange = (e) => {
                     setImportFile(e.target.files[0]);
                 };
@@ -1825,7 +1828,14 @@
                         return;
                     }
 
-                    if (!window.confirm('警告：此操作將新增數據到您現有的庫存中，可能會造成重複。您確定要繼續嗎？')) {
+                    let confirmMessage = `您確定要匯入數據嗎？總共將新增約 ${Math.round(importFile.size / 1024)} KB 的數據。`;
+                    if (clearExistingData) {
+                        confirmMessage = `警告：您已選擇 **清除所有現有庫存數據** 後再匯入。此操作不可逆，確定要繼續嗎？`;
+                    } else {
+                        confirmMessage += ` (注意: 數據將以新增方式匯入，可能會有重複)`;
+                    }
+
+                    if (!window.confirm(confirmMessage)) {
                         return;
                     }
 
@@ -1845,8 +1855,29 @@
                         if (!importJson.inventory_items || !importJson.stock_outs) {
                             throw new Error('JSON 格式錯誤：缺少必要的 inventory_items 或 stock_outs 欄位。');
                         }
+                        
+                        // 📌 1. 清除現有數據
+                        if (clearExistingData) {
+                            setMessage('正在清除所有現有數據...');
+                            // 刪除 stock_outs
+                            const { error: outDelError } = await supabaseClient
+                                .from('stock_outs')
+                                .delete()
+                                .eq('user_id', userId);
+                            if (outDelError) console.warn("Stock outs deletion warning during import:", outDelError);
 
-                        // 清理並準備插入數據 (最重要：覆蓋 user_id)
+                            // 刪除 inventory_items
+                            const { error: invDelError } = await supabaseClient
+                                .from('inventory_items')
+                                .delete()
+                                .eq('user_id', userId);
+                            if (invDelError) throw invDelError;
+                            
+                            setMessage('舊數據清除完成。');
+                        }
+
+
+                        // 2. 清理並準備插入數據 (最重要：覆蓋 user_id)
                         const itemsToInsert = importJson.inventory_items.map(item => {
                             // 移除 ID 和 created_at，讓 Supabase 重新生成
                             const { id, created_at, ...rest } = item;
@@ -1860,7 +1891,7 @@
                         
                         let totalInserted = 0;
 
-                        // 1. 批次插入 inventory_items
+                        // 3. 批次插入 inventory_items
                         if (itemsToInsert.length > 0) {
                             setMessage(`正在插入 ${itemsToInsert.length} 筆入庫記錄...`);
                             const { error } = await supabaseClient
@@ -1870,7 +1901,7 @@
                             totalInserted += itemsToInsert.length;
                         }
 
-                        // 2. 批次插入 stock_outs
+                        // 4. 批次插入 stock_outs
                         if (outsToInsert.length > 0) {
                             setMessage(`正在插入 ${outsToInsert.length} 筆出庫記錄...`);
                             const { error } = await supabaseClient
@@ -1899,7 +1930,7 @@
                 };
                 
                 
-                // 處理新增類別
+                // 處理新增類別 (無變動)
                 const handleAddCategory = () => {
                     const name = newCategoryName.trim();
                     if (name && !categories.map(c => c.toLowerCase()).includes(name.toLowerCase())) {
@@ -1911,7 +1942,7 @@
                     }
                 };
 
-                // 處理刪除類別
+                // 處理刪除類別 (無變動)
                 const handleDeleteCategory = (name) => {
                     setCategories(categories.filter(cat => cat !== name));
                 };
@@ -1932,7 +1963,7 @@
                         user_id: userId,
                         categories: categories, 
                         currency: currency,
-                        use_realtime_rate: useRealtimeRate, // 📌 儲存新設定
+                        use_realtime_rate: useRealtimeRate, 
                     };
 
                     try {
@@ -1970,7 +2001,7 @@
                         )}
 
                         <form onSubmit={handleSaveSettings} className="space-y-6">
-                            {/* 貨幣設定 - 使用下拉選單 */}
+                            {/* 貨幣設定 - 使用下拉選單 (無變動) */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">
                                     預設貨幣代碼 (用於成本/總值)
@@ -1988,7 +2019,7 @@
                                 <p className="mt-1 text-xs text-gray-500">請選擇三位字母代碼。</p>
                             </div>
                             
-                            {/* 📌 新增：匯率計算模式開關 */}
+                            {/* 匯率計算模式開關 (無變動) */}
                             <div className="border border-gray-200 p-4 rounded-lg bg-gray-50 flex justify-between items-center">
                                 <div>
                                     <label className="text-sm font-medium text-gray-700 block">
@@ -2014,7 +2045,7 @@
                             </div>
 
 
-                            {/* 類別設定 */}
+                            {/* 類別設定 (無變動) */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-2">
                                     庫存類別列表
@@ -2065,11 +2096,11 @@
                             </button>
                         </form>
                         
-                        {/* --- 📌 匯入/匯出區塊 --- */}
+                        {/* --- 匯入/匯出區塊 --- */}
                         <div className="border-t pt-6 mt-6 space-y-4">
                             <h3 className="text-xl font-semibold text-gray-800">資料備份與還原</h3>
                             
-                            {/* 匯出區塊 */}
+                            {/* 匯出區塊 (無變動) */}
                             <div className="border border-blue-200 p-4 rounded-lg bg-blue-50">
                                 <p className="text-sm font-medium text-blue-800 mb-2">匯出所有數據 (備份)</p>
                                 <p className="text-xs text-blue-600 mb-3">匯出檔案包含所有入庫和出庫記錄。建議定期備份。</p>
@@ -2082,11 +2113,29 @@
                                 </button>
                             </div>
 
-                            {/* 匯入區塊 */}
+                            {/* 匯入區塊 (新增清除選項) */}
                             <div className="border border-orange-200 p-4 rounded-lg bg-orange-50">
                                 <p className="text-sm font-medium text-orange-800 mb-2">匯入數據 (還原/遷移)</p>
+                                
+                                {/* 📌 新增：清除現有數據選項 */}
+                                <div className="flex items-center mb-3">
+                                    <input
+                                        id="clear-data-checkbox"
+                                        type="checkbox"
+                                        checked={clearExistingData}
+                                        onChange={(e) => setClearExistingData(e.target.checked)}
+                                        className="w-4 h-4 text-red-600 bg-gray-100 border-gray-300 rounded focus:ring-red-500"
+                                    />
+                                    <label htmlFor="clear-data-checkbox" className="ml-2 text-sm font-bold text-red-700">
+                                        匯入前清除所有現有數據 (不可逆)
+                                    </label>
+                                </div>
+
                                 <p className="text-xs text-orange-600 mb-3">
-                                    **警告：** 匯入操作會將數據新增到現有記錄中，不會自動覆蓋。
+                                    {clearExistingData
+                                        ? '**警告：** 此操作將在匯入前刪除您現有的所有庫存及出庫記錄。'
+                                        : '**注意：** 數據將以新增方式匯入，與現有記錄合併。'
+                                    }
                                 </p>
                                 <div className="flex gap-2">
                                     <input
@@ -2105,21 +2154,21 @@
                                     </button>
                                 </div>
                             </div>
-                        </div>
 
 
-                        {/* 帳戶操作 */}
-                        <div className="border-t pt-6 mt-6 space-y-4">
-                            <h3 className="text-xl font-semibold text-gray-800">帳戶管理</h3>
-                            <p className="text-sm text-gray-600">
-                                您的 Supabase ID: <code className="bg-gray-200 p-1 rounded text-xs">{userId}</code>
-                            </p>
-                            <button
-                                onClick={handleLogout}
-                                className="w-full py-2 px-4 bg-red-500 text-white font-semibold rounded-lg shadow-md hover:bg-red-600 transition duration-300"
-                            >
-                                登出
-                            </button>
+                            {/* 帳戶操作 (無變動) */}
+                            <div className="border-t pt-6 mt-6 space-y-4">
+                                <h3 className="text-xl font-semibold text-gray-800">帳戶管理</h3>
+                                <p className="text-sm text-gray-600">
+                                    您的 Supabase ID: <code className="bg-gray-200 p-1 rounded text-xs">{userId}</code>
+                                </p>
+                                <button
+                                    onClick={handleLogout}
+                                    className="w-full py-2 px-4 bg-red-500 text-white font-semibold rounded-lg shadow-md hover:bg-red-600 transition duration-300"
+                                >
+                                    登出
+                                </button>
+                            </div>
                         </div>
                     </div>
                 );
