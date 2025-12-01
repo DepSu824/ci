@@ -235,6 +235,23 @@
 
             return Object.values(grouped);
         };
+        
+        // ----------------------------------------------------------------------
+        // 📌 新增輔助函式：JSON 檔案下載 (Export Helper)
+        // ----------------------------------------------------------------------
+        const downloadJsonFile = (data, filename) => {
+            const jsonString = JSON.stringify(data, null, 2);
+            const blob = new Blob([jsonString], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
+
 
         // ----------------------------------------------------------------------
         // 3. Supabase 身份驗證/登入組件 (AuthForm)
@@ -1739,19 +1756,148 @@
             };
 
             // ----------------------------------------------------------------------
-            // 11. 組件 - 設定面板 (SettingsPanel) - 完整實作類別邏輯
+            // 11. 組件 - 設定面板 (SettingsPanel) - 完整實作類別和匯入/匯出邏輯
             // ----------------------------------------------------------------------
             const SettingsPanel = ({ supabaseClient, userId, currentSettings, handleLogout, setActiveTab, supportedCurrencies, onSettingsSaved }) => {
                 
                 const [categories, setCategories] = useState(currentSettings.categories || []);
                 const [newCategoryName, setNewCategoryName] = useState('');
                 const [currency, setCurrency] = useState(currentSettings.currency);
-                
-                // 📌 新狀態：匯率切換開關
                 const [useRealtimeRate, setUseRealtimeRate] = useState(currentSettings.use_realtime_rate); 
-
+                
+                // 匯入/匯出狀態
+                const [importFile, setImportFile] = useState(null);
                 const [message, setMessage] = useState('');
                 const [loading, setLoading] = useState(false);
+                
+                // --- 匯出邏輯 ---
+                const handleExportData = async () => {
+                    setLoading(true);
+                    setMessage('正在準備匯出數據...');
+                    try {
+                        // 1. 獲取所有 inventory_items
+                        const { data: invData, error: invError } = await supabaseClient
+                            .from('inventory_items')
+                            .select('*')
+                            .eq('user_id', userId);
+                        if (invError) throw invError;
+
+                        // 2. 獲取所有 stock_outs
+                        const { data: outData, error: outError } = await supabaseClient
+                            .from('stock_outs')
+                            .select('*')
+                            .eq('user_id', userId);
+                        if (outError) throw outError;
+                        
+                        // 3. 組合成單一物件
+                        const exportData = {
+                            metadata: {
+                                created_at: new Date().toISOString(),
+                                user_id_original: userId, 
+                                app_version: 'v1.0.0_with_import_export'
+                            },
+                            inventory_items: invData,
+                            stock_outs: outData,
+                        };
+
+                        // 4. 下載檔案
+                        const filename = `inventory_backup_${new Date().toISOString().substring(0, 10)}.json`;
+                        downloadJsonFile(exportData, filename);
+
+                        setMessage('成功匯出所有數據！');
+                    } catch (error) {
+                        console.error('Export Error:', error);
+                        setMessage('匯出數據失敗，請檢查權限或連線。');
+                    } finally {
+                        setLoading(false);
+                        setTimeout(() => setMessage(''), 5000);
+                    }
+                };
+
+                // --- 匯入邏輯 ---
+                const handleFileChange = (e) => {
+                    setImportFile(e.target.files[0]);
+                };
+
+                const handleImportData = async () => {
+                    if (!importFile) {
+                        setMessage('請先選擇要匯入的 JSON 檔案。');
+                        return;
+                    }
+
+                    if (!window.confirm('警告：此操作將新增數據到您現有的庫存中，可能會造成重複。您確定要繼續嗎？')) {
+                        return;
+                    }
+
+                    setLoading(true);
+                    setMessage('正在讀取並處理匯入檔案...');
+
+                    try {
+                        const fileText = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = (e) => resolve(e.target.result);
+                            reader.onerror = (e) => reject(e);
+                            reader.readAsText(importFile);
+                        });
+
+                        const importJson = JSON.parse(fileText);
+                        
+                        if (!importJson.inventory_items || !importJson.stock_outs) {
+                            throw new Error('JSON 格式錯誤：缺少必要的 inventory_items 或 stock_outs 欄位。');
+                        }
+
+                        // 清理並準備插入數據 (最重要：覆蓋 user_id)
+                        const itemsToInsert = importJson.inventory_items.map(item => {
+                            // 移除 ID 和 created_at，讓 Supabase 重新生成
+                            const { id, created_at, ...rest } = item;
+                            return { ...rest, user_id: userId };
+                        });
+
+                        const outsToInsert = importJson.stock_outs.map(out => {
+                            const { id, created_at, ...rest } = out;
+                            return { ...rest, user_id: userId };
+                        });
+                        
+                        let totalInserted = 0;
+
+                        // 1. 批次插入 inventory_items
+                        if (itemsToInsert.length > 0) {
+                            setMessage(`正在插入 ${itemsToInsert.length} 筆入庫記錄...`);
+                            const { error } = await supabaseClient
+                                .from('inventory_items')
+                                .insert(itemsToInsert);
+                            if (error) throw error;
+                            totalInserted += itemsToInsert.length;
+                        }
+
+                        // 2. 批次插入 stock_outs
+                        if (outsToInsert.length > 0) {
+                            setMessage(`正在插入 ${outsToInsert.length} 筆出庫記錄...`);
+                            const { error } = await supabaseClient
+                                .from('stock_outs')
+                                .insert(outsToInsert);
+                            if (error) throw error;
+                            totalInserted += outsToInsert.length;
+                        }
+
+                        setMessage(`匯入成功！總共新增 ${totalInserted} 筆記錄。`);
+                        setImportFile(null);
+                        document.getElementById('import-file-input').value = '';
+                        onSettingsSaved(); // 重新載入所有數據
+                        
+                        setTimeout(() => {
+                            setMessage('');
+                            setActiveTab('inventory');
+                        }, 5000);
+
+                    } catch (error) {
+                        console.error('Import Error:', error);
+                        setMessage(`匯入失敗: ${error.message || '檔案格式錯誤或數據庫插入失敗。'}`);
+                        setLoading(false);
+                        setTimeout(() => setMessage(''), 8000);
+                    }
+                };
+                
                 
                 // 處理新增類別
                 const handleAddCategory = () => {
@@ -1771,7 +1917,7 @@
                 };
 
 
-                const handleSubmit = async (e) => {
+                const handleSaveSettings = async (e) => {
                     e.preventDefault();
                     setLoading(true);
                     setMessage('');
@@ -1817,7 +1963,13 @@
                     <div className="p-6 bg-white shadow-xl rounded-2xl space-y-8">
                         <h2 className="text-2xl font-bold text-gray-800 border-b pb-4">應用程式設定</h2>
 
-                        <form onSubmit={handleSubmit} className="space-y-6">
+                        {message && (
+                            <div className={`p-3 text-sm rounded-lg text-center ${message.includes('成功') ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                {message}
+                            </div>
+                        )}
+
+                        <form onSubmit={handleSaveSettings} className="space-y-6">
                             {/* 貨幣設定 - 使用下拉選單 */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1911,13 +2063,50 @@
                             >
                                 {loading ? '儲存中...' : '儲存設定'}
                             </button>
-
-                            {message && (
-                                <div className={`p-3 text-sm rounded-lg text-center ${message.includes('成功') ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                                    {message}
-                                </div>
-                            )}
                         </form>
+                        
+                        {/* --- 📌 匯入/匯出區塊 --- */}
+                        <div className="border-t pt-6 mt-6 space-y-4">
+                            <h3 className="text-xl font-semibold text-gray-800">資料備份與還原</h3>
+                            
+                            {/* 匯出區塊 */}
+                            <div className="border border-blue-200 p-4 rounded-lg bg-blue-50">
+                                <p className="text-sm font-medium text-blue-800 mb-2">匯出所有數據 (備份)</p>
+                                <p className="text-xs text-blue-600 mb-3">匯出檔案包含所有入庫和出庫記錄。建議定期備份。</p>
+                                <button
+                                    onClick={handleExportData}
+                                    disabled={loading}
+                                    className="w-full py-2 px-4 bg-blue-500 text-white font-semibold rounded-lg shadow-md hover:bg-blue-600 transition disabled:opacity-50"
+                                >
+                                    {loading ? '匯出中...' : '下載備份 JSON 檔案'}
+                                </button>
+                            </div>
+
+                            {/* 匯入區塊 */}
+                            <div className="border border-orange-200 p-4 rounded-lg bg-orange-50">
+                                <p className="text-sm font-medium text-orange-800 mb-2">匯入數據 (還原/遷移)</p>
+                                <p className="text-xs text-orange-600 mb-3">
+                                    **警告：** 匯入操作會將數據新增到現有記錄中，不會自動覆蓋。
+                                </p>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="file"
+                                        id="import-file-input"
+                                        accept=".json"
+                                        onChange={handleFileChange}
+                                        className="flex-grow p-1 text-sm text-gray-700 border border-orange-300 rounded-lg file:mr-4 file:py-1 file:px-2 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-orange-100 file:text-orange-700 hover:file:bg-orange-200"
+                                    />
+                                    <button
+                                        onClick={handleImportData}
+                                        disabled={loading || !importFile}
+                                        className="py-2 px-4 bg-orange-500 text-white font-semibold rounded-lg shadow-md hover:bg-orange-600 transition disabled:opacity-50 text-sm"
+                                    >
+                                        {loading ? '匯入中...' : '開始匯入'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
 
                         {/* 帳戶操作 */}
                         <div className="border-t pt-6 mt-6 space-y-4">
